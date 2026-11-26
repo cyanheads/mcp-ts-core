@@ -10,8 +10,14 @@ import { describe, expect, it } from 'vitest';
 
 import {
   classifyDuckdbError,
+  isCtasNameTaken,
+  isDropOverView,
+  isViewOverTable,
   prepareFailureRecovery,
-} from '@/services/canvas/providers/duckdb/DuckdbProvider.js';
+  registerAsClash,
+  viewTableClash,
+  viewUnreadableError,
+} from '@/services/canvas/providers/duckdb/duckdbErrors.js';
 import { JsonRpcErrorCode, McpError, notFound, validationError } from '@/types-global/errors.js';
 import { expectLinearCost } from '../../../helpers/cpu-time.js';
 
@@ -256,6 +262,13 @@ describe('classifyDuckdbError · execution-time data errors (#451)', () => {
   const BINDER_EXECUTION_HINT =
     'Correct the argument the message names, such as a zero step or an infinite bound in range or generate_series. When it names a column, define the view that reads it again over the tables as now staged.';
 
+  /**
+   * An argument a function rejects as it runs: a row's value, or a constant in
+   * the SQL, which the message cannot tell apart.
+   */
+  const INVALID_INPUT_HINT =
+    'Correct the argument the message names if it is a constant in the SQL, such as a regex pattern or format string; otherwise filter out the rows whose values the function cannot read, or use the function’s TRY variant where it has one, such as TRY_CAST or TRY_STRPTIME.';
+
   /** Each class with a message measured from DuckDB v2.0.0, and the recovery that class calls for. */
   const EXECUTION_MESSAGES = [
     [
@@ -264,12 +277,16 @@ describe('classifyDuckdbError · execution-time data errors (#451)', () => {
     ],
     [
       'Invalid Input Error: Malformed JSON at byte 0 of input: invalid literal.  Input: "nope"',
-      'Filter out the rows whose values the function cannot read, or use the function’s TRY variant where it has one, such as TRY_CAST or TRY_STRPTIME.',
+      INVALID_INPUT_HINT,
     ],
     [
       'Invalid Input Error: Could not parse string "a" according to format specifier "%Y"',
-      'Filter out the rows whose values the function cannot read, or use the function’s TRY variant where it has one, such as TRY_CAST or TRY_STRPTIME.',
+      INVALID_INPUT_HINT,
     ],
+    // Constants rejected as the statement runs: `format('{', 1)` on v1.5.6 and
+    // v2.0.1, and a regex pattern on v2.0.1, which v1.5.6 rejects at prepare.
+    ['Invalid Input Error: invalid format string', INVALID_INPUT_HINT],
+    ['Invalid Input Error: missing ): (', INVALID_INPUT_HINT],
     [
       'Out of Range Error: Overflow in addition of INT64 (9223372036854775807 + 1)!',
       'Cast to a wider type such as HUGEINT or DOUBLE before the arithmetic that overflows, or filter out the rows whose values are out of range.',
@@ -397,6 +414,8 @@ describe('classifyDuckdbError · a table missing while a statement runs', () => 
       tableName,
       recovery: { hint: MISSING_TABLE_HINT },
     });
+    // The name is the one value a caller sends back, so `content[]` renders it as code (#863).
+    expect(mcp.literals).toEqual([tableName]);
     expect(mcp.cause).toBe(original);
   });
 
@@ -408,6 +427,146 @@ describe('classifyDuckdbError · a table missing while a statement runs', () => 
     const mcp = classifyDuckdbError(new Error(message)) as McpError;
     expect(mcp.code).toBe(JsonRpcErrorCode.DatabaseError);
     expect(mcp.data?.reason).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A name already staged, as a CTAS or a view definition finds it (#891)
+// ---------------------------------------------------------------------------
+
+describe('name clashes a CTAS or a view definition raises (#891)', () => {
+  /** Measured from v2.0.1-r.1 and v1.5.6-r.2; the engine joins the catalog key with a literal `\0`. */
+  const CTAS_REFUSALS = [
+    'Catalog Error: Table with name "df_SAME" already exists!',
+    'Catalog Error: View with name "df_SAME" already exists!',
+    String.raw`TransactionContext Error: Catalog write-write conflict on create with "Schema\0main\0Table\0main\0df_SAME"`,
+    String.raw`TransactionContext Error: Catalog write-write conflict on create with "Schema\0main\0main\0Table\0main\0df_SAME"`,
+    String.raw`TransactionContext Error: Catalog write-write conflict on alter with "Table\0main\0df_SAME\0Schema\0main\0main"`,
+  ];
+
+  it.each(CTAS_REFUSALS)('reads %s as a CTAS name already taken', (message) => {
+    expect(isCtasNameTaken(new Error(message))).toBe(true);
+  });
+
+  it.each([
+    'Catalog Error: Table with name df_SAME does not exist!',
+    'Catalog Error: Table with name "df_SAME" already exists',
+    'Invalid Input Error: Catalog Error: Table with name "df_SAME" already exists!',
+    'IO Error: Cannot open file "/srv/TransactionContext Error: Catalog write-write conflict on x": Permission denied',
+    'TransactionContext Error: Cannot write to database "memory" - transaction is launched in read-only mode',
+  ])('reads %s as no CTAS name clash', (message) => {
+    expect(isCtasNameTaken(new Error(message))).toBe(false);
+  });
+
+  it('reads a thrown non-Error as no name clash', () => {
+    expect(isCtasNameTaken(CTAS_REFUSALS[0])).toBe(false);
+    expect(
+      isViewOverTable(
+        'Catalog Error: Existing object x is of type Table, trying to replace with type View',
+      ),
+    ).toBe(false);
+  });
+
+  // The provider reads these texts as a name clash only where a CTAS raised them.
+  it.each(CTAS_REFUSALS)(
+    'leaves %s a DatabaseError with no reason in the classifier',
+    (message) => {
+      const mcp = classifyDuckdbError(new Error(message)) as McpError;
+      expect(mcp.code).toBe(JsonRpcErrorCode.DatabaseError);
+      expect(mcp.data?.reason).toBeUndefined();
+    },
+  );
+
+  it.each([
+    // v2.0.1 quotes the name, v1.5.6 does not.
+    'Catalog Error: Existing object "caset" is of type Table, trying to replace with type View',
+    'Catalog Error: Existing object caset is of type Table, trying to replace with type View',
+  ])('reads %s as a view definition over a table', (message) => {
+    expect(isViewOverTable(new Error(message))).toBe(true);
+  });
+
+  it.each([
+    'Catalog Error: Existing object "caset" is of type View, trying to replace with type Table',
+    String.raw`TransactionContext Error: Catalog write-write conflict on create with "Schema\0main\0View\0main\0v"`,
+    'Binder Error: Existing object "caset" is of type Table, trying to replace with type View',
+  ])('reads %s as no view definition over a table', (message) => {
+    expect(isViewOverTable(new Error(message))).toBe(false);
+  });
+
+  it.each([
+    // An import's replace step dropping a table where a view holds the name in another case.
+    ['Catalog Error: Existing object "casev" is of type View, trying to drop type Table', true],
+    ['Catalog Error: Existing object casev is of type View, trying to drop type Table', true],
+    [
+      'Catalog Error: Existing object "caset" is of type Table, trying to replace with type View',
+      false,
+    ],
+    ['Catalog Error: Table with name casev does not exist!', false],
+  ] as const)('reads %s as a table drop over a view: %s', (message, expected) => {
+    expect(isDropOverView(new Error(message))).toBe(expected);
+  });
+
+  it.each([
+    ['without an engine cause', undefined],
+    ['with the engine refusal as cause', new Error(CTAS_REFUSALS[0])],
+  ])('builds register_as_clash %s, the name a literal', (_label, cause) => {
+    const mcp = registerAsClash('df__SAME', cause);
+    expect(mcp.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(mcp.message).toBe(
+      'Canvas table "df__SAME" already exists. Drop it before reusing the name.',
+    );
+    expect(mcp.data).toEqual({
+      reason: 'register_as_clash',
+      tableName: 'df__SAME',
+      recovery: {
+        hint: "A table or view with this name is already staged on the canvas. Use another name for the result, or query the staged one if it holds what you need — list what is staged with this server's dataframe-describe tool.",
+      },
+    });
+    expect(mcp.literals).toEqual(['df__SAME']);
+    expect(mcp.cause).toBe(cause);
+    expect('cause' in mcp).toBe(cause !== undefined);
+    // The provider's catch passes it through unchanged (#254).
+    expect(classifyDuckdbError(mcp)).toBe(mcp);
+  });
+
+  it.each([
+    ['without an engine cause', undefined],
+    [
+      'with the engine refusal as cause',
+      new Error(
+        'Catalog Error: Existing object "v__x" is of type Table, trying to replace with type View',
+      ),
+    ],
+  ])('builds view_table_clash %s, the name a literal', (_label, cause) => {
+    const mcp = viewTableClash('v__x', cause);
+    expect(mcp.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(mcp.message).toBe(
+      'Canvas already contains a base table named "v__x". Drop the table or choose a different name.',
+    );
+    expect(mcp.data).toEqual({
+      reason: 'view_table_clash',
+      name: 'v__x',
+      recovery: { hint: 'Choose another name for the view, or drop the table first.' },
+    });
+    expect(mcp.literals).toEqual(['v__x']);
+    expect(mcp.cause).toBe(cause);
+    expect('cause' in mcp).toBe(cause !== undefined);
+  });
+});
+
+describe('viewUnreadableError · the views it names (#863)', () => {
+  it('passes every view it names as a literal, in the order it names them', () => {
+    const mcp = viewUnreadableError(
+      [
+        { name: 'v__also', error: new Error('Binder Error: interval cannot be 0!') },
+        { name: 'v__reads', error: new Error('Catalog Error: Table with name t does not exist!') },
+      ],
+      [],
+    );
+    expect(mcp.message).toBe(
+      'Canvas views could not be read: "v__also" — Binder Error: interval cannot be 0!; "v__reads" — Catalog Error: Table with name t does not exist!',
+    );
+    expect(mcp.literals).toEqual(['v__also', 'v__reads']);
   });
 });
 
@@ -453,6 +612,8 @@ describe('prepareFailureRecovery · one hint per engine class (#803)', () => {
     ...[
       'Invalid Input Error: missing ): (',
       'Invalid Input Error: Failed to parse format specifier %Q: Unrecognized format for strftime/strptime: %Q',
+      // A constant folded while the statement is prepared, on v1.5.6 and v2.0.1.
+      'Conversion Error: extract specifier "fortnight" not recognized',
     ].map(
       (message) =>
         [
@@ -493,8 +654,9 @@ describe('prepareFailureRecovery · one hint per engine class (#803)', () => {
 /**
  * Engine messages of about `size` characters, one per shape an anchored class read must
  * handle: a repeated wrapper with no class after it, overlapping class prefixes, a near-miss of the
- * read-only refusal, one long line ending in a break, breaks throughout, and a parser message
- * quoting long caller SQL.
+ * read-only refusal, one long line ending in a break, breaks throughout, a parser message
+ * quoting long caller SQL, and a near-miss and a match of each name clash a CTAS or a view
+ * definition raises.
  */
 function engineMessages(size: number): Error[] {
   const fill = (unit: string) => unit.repeat(Math.ceil(size / unit.length)).slice(0, size);
@@ -512,8 +674,24 @@ function engineMessages(size: number): Error[] {
     `Catalog Error: Table with name ${fill('a does not exist')}`,
     `Catalog Error: Table with name ${fill('x')} does not exist!`,
     `Out of Memory Error: ${fill('x')}\n\nPossible solutions:\n${fill('* SET x\n')}`,
+    `Conversion Error: ${fill('Conversion Erro')}`,
+    `Catalog Error: Table with name ${fill(' already exists')}`,
+    `Catalog Error: View with name ${fill('x')} already exists!`,
+    `TransactionContext Error: ${fill('Catalog write-write conflict on')}`,
+    `Catalog Error: Existing object ${fill(' is of type Table')}`,
+    `Catalog Error: Existing object ${fill('x')} is of type Table, trying to replace with type View`,
+    `Catalog Error: Existing object ${fill(' is of type View')}`,
+    `Catalog Error: Existing object ${fill('x')} is of type View, trying to drop type Table`,
   ].map((message) => new Error(message));
 }
+
+/** The constant-argument recovery a prepare-time `Invalid Input` or `Conversion` error takes. */
+const CONSTANT_ARGUMENT_HINT =
+  'Correct the argument value the message names — a pattern, format string, or other constant the function cannot accept.';
+
+/** The prepare-time `Catalog Error` recovery. */
+const CATALOG_HINT =
+  "Correct the function, type, collation, or schema name the message reports missing — list the staged tables with this server's dataframe-describe tool.";
 
 describe('engine-message classification cost', () => {
   it('classifies an engine message in time linear in its length', () => {
@@ -537,6 +715,14 @@ describe('engine-message classification cost', () => {
         undefined,
         'missing_table',
         undefined,
+        'sql_execution_error',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
       ]);
       expect(classified[8]?.message).not.toContain('/srv/exports');
       expect(classified[12]?.message).not.toContain('Possible solutions');
@@ -544,7 +730,7 @@ describe('engine-message classification cost', () => {
         for (const err of errors) classifyDuckdbError(err, ['/srv/exports', '/tmp/mcp-canvas-x']);
       };
     });
-  });
+  }, 0);
 
   it('picks a prepare-failure hint in time linear in the message length', () => {
     expectLinearCost((size) => {
@@ -554,20 +740,47 @@ describe('engine-message classification cost', () => {
         BINDER_HINT,
         BINDER_HINT,
         BINDER_HINT,
-        'Correct the argument value the message names — a pattern, format string, or other constant the function cannot accept.',
+        CONSTANT_ARGUMENT_HINT,
         BINDER_HINT,
         BINDER_HINT,
         PARSE_HINT,
-        "Correct the function, type, collation, or schema name the message reports missing — list the staged tables with this server's dataframe-describe tool.",
+        CATALOG_HINT,
         "Send a read-only SELECT over the staged tables — list them with this server's dataframe-describe tool. This surface reads no files and cannot create, alter, or drop anything.",
         BINDER_HINT,
-        "Correct the function, type, collation, or schema name the message reports missing — list the staged tables with this server's dataframe-describe tool.",
-        "Correct the function, type, collation, or schema name the message reports missing — list the staged tables with this server's dataframe-describe tool.",
+        CATALOG_HINT,
+        CATALOG_HINT,
         BINDER_HINT,
+        CONSTANT_ARGUMENT_HINT,
+        CATALOG_HINT,
+        CATALOG_HINT,
+        BINDER_HINT,
+        CATALOG_HINT,
+        CATALOG_HINT,
+        CATALOG_HINT,
+        CATALOG_HINT,
       ]);
       return () => {
         for (const message of messages) prepareFailureRecovery(message);
       };
     });
-  });
+  }, 0);
+
+  it('reads a name clash a CTAS, a view definition, or a drop raises in time linear in the message length', () => {
+    expectLinearCost((size) => {
+      const errors = engineMessages(size);
+      // Which messages each read matches at this size: one each, the rest near-misses.
+      const matching = (read: (err: unknown) => boolean) =>
+        errors.flatMap((err, index) => (read(err) ? [index] : []));
+      expect(matching(isCtasNameTaken)).toEqual([15]);
+      expect(matching(isViewOverTable)).toEqual([18]);
+      expect(matching(isDropOverView)).toEqual([20]);
+      return () => {
+        for (const err of errors) {
+          isCtasNameTaken(err);
+          isViewOverTable(err);
+          isDropOverView(err);
+        }
+      };
+    });
+  }, 0);
 });

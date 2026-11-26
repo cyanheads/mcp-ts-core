@@ -32,10 +32,8 @@ import {
   collectPlanViolations,
   INTERNAL_METADATA_VIEWS,
 } from '@/services/canvas/core/sqlGate.js';
-import {
-  classifyDuckdbError,
-  DuckdbProvider,
-} from '@/services/canvas/providers/duckdb/DuckdbProvider.js';
+import { DuckdbProvider } from '@/services/canvas/providers/duckdb/DuckdbProvider.js';
+import { classifyDuckdbError } from '@/services/canvas/providers/duckdb/duckdbErrors.js';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import type { RequestContext } from '@/utils/internal/requestContext.js';
 

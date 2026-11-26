@@ -10,6 +10,7 @@
  * @module tests/smoke/services/canvas-scratch.test
  */
 
+import { existsSync } from 'node:fs';
 import {
   chmod,
   mkdir,
@@ -24,7 +25,7 @@ import {
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, relative } from 'node:path';
 
-import { DuckDBInstance } from '@duckdb/node-api';
+import { DuckDBConnection, DuckDBInstance } from '@duckdb/node-api';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { CanvasRegistry } from '@/services/canvas/core/CanvasRegistry.js';
@@ -249,6 +250,34 @@ function pauseNextConnection(): { reached: Promise<void>; release(): void } {
     await gate.promise;
     return connection;
   });
+  return { reached: reached.promise, release: () => gate.resolve() };
+}
+
+/**
+ * Holds the next `count` calls to `owner[method]` before they run until
+ * `release()`, then runs each through: a canvas call in flight at a moment the
+ * test chooses, before its first statement on the control connection or
+ * before its own connection opens.
+ */
+function pauseCallsTo(
+  owner: object,
+  method: string,
+  count = 1,
+): { reached: Promise<void>; release(): void } {
+  const target = owner as Record<string, (...args: unknown[]) => Promise<unknown>>;
+  const original = target[method]!;
+  const reached = Promise.withResolvers<void>();
+  const gate = Promise.withResolvers<void>();
+  let arrived = 0;
+  const spy = vi.spyOn(target, method);
+  for (let i = 0; i < count; i += 1) {
+    spy.mockImplementationOnce(async function (this: unknown, ...args: unknown[]) {
+      arrived += 1;
+      if (arrived === count) reached.resolve();
+      await gate.promise;
+      return await original.apply(this, args);
+    });
+  }
   return { reached: reached.promise, release: () => gate.resolve() };
 }
 
@@ -669,7 +698,7 @@ describe('canvas · DuckDB scratch I/O', () => {
     );
   });
 
-  // A call's own connection keeps the canvas's database open past drop, TTL
+  // A call in flight keeps the canvas's database open past drop, TTL
   // eviction, and shutdown, and reads the blocks the canvas spilled back from
   // its spill directory. Removing that directory under the call fails it with
   // an IO Error on a missing spill file, so the directory stays until every
@@ -726,6 +755,222 @@ describe('canvas · DuckDB scratch I/O', () => {
       expect(whileRunning).toEqual([spillDir]);
       await vi.waitFor(async () => expect(await readdir(parent)).toEqual([]));
     }, 60_000);
+  });
+
+  // #893 — a call in flight holds its canvas, so the canvas's control
+  // connection and DuckDB instance close, and its spill directory goes, once
+  // the last such call settles; every teardown returns without waiting for it.
+  describe('a call in flight when its canvas is destroyed (#893)', () => {
+    const ROWS = [
+      { id: 1, label: 'alpha' },
+      { id: 2, label: 'beta' },
+    ];
+    const LABELS = [{ label: 'alpha' }, { label: 'beta' }];
+    const notFound = { code: JsonRpcErrorCode.NotFound, data: { reason: 'canvas_not_found' } };
+
+    /**
+     * Spies on `canvasId`'s control connection and instance closes, and makes
+     * its spill directory, which DuckDB itself creates only on a first spill,
+     * so the teardown has one to remove. `spillDirAtClose()` says whether the
+     * directory was still there as the instance closed.
+     */
+    async function watchTeardown(provider: DuckdbProvider, canvasId: string) {
+      // biome-ignore lint/complexity/useLiteralKeys: deliberate access to the private record to watch its engine close.
+      const record = provider['canvases'].get(canvasId)!;
+      await mkdir(record.spillDir);
+      const closeInstance = record.instance.closeSync.bind(record.instance);
+      let spillDirAtClose: boolean | undefined;
+      const controlClose = vi.spyOn(record.controlConnection, 'closeSync');
+      const instanceClose = vi.spyOn(record.instance, 'closeSync').mockImplementation(() => {
+        spillDirAtClose = existsSync(record.spillDir);
+        closeInstance();
+      });
+      return {
+        controlClose,
+        instanceClose,
+        spillDir: record.spillDir,
+        spillDirAtClose: () => spillDirAtClose,
+      };
+    }
+
+    type Watched = Awaited<ReturnType<typeof watchTeardown>>;
+
+    function expectNotClosed(watched: Watched): void {
+      expect(watched.controlClose).not.toHaveBeenCalled();
+      expect(watched.instanceClose).not.toHaveBeenCalled();
+      expect(existsSync(watched.spillDir)).toBe(true);
+    }
+
+    /** The control connection closed, then the instance, then the spill directory went. */
+    async function expectClosedInOrder(watched: Watched): Promise<void> {
+      await vi.waitFor(() => {
+        expect(watched.controlClose).toHaveBeenCalledTimes(1);
+        expect(watched.instanceClose).toHaveBeenCalledTimes(1);
+        expect(existsSync(watched.spillDir)).toBe(false);
+      });
+      expect(watched.controlClose.mock.invocationCallOrder[0]).toBeLessThan(
+        watched.instanceClose.mock.invocationCallOrder[0]!,
+      );
+      expect(watched.spillDirAtClose()).toBe(true);
+    }
+
+    async function stagedCanvas(canvasId: string) {
+      const { parent, provider } = await makeProvider();
+      await provider.initCanvas(canvasId, ctx);
+      await provider.registerTable(canvasId, 't', ROWS, ctx);
+      return { parent, provider, watched: await watchTeardown(provider, canvasId) };
+    }
+
+    it('closes a canvas with nothing in flight, and removes its spill directory, before destroyCanvas resolves', async () => {
+      const { provider, watched } = await stagedCanvas('idlecanvas');
+
+      await provider.destroyCanvas('idlecanvas', ctx);
+
+      expect(watched.controlClose).toHaveBeenCalledTimes(1);
+      expect(watched.instanceClose).toHaveBeenCalledTimes(1);
+      expect(existsSync(watched.spillDir)).toBe(false);
+      expect(watched.controlClose.mock.invocationCallOrder[0]).toBeLessThan(
+        watched.instanceClose.mock.invocationCallOrder[0]!,
+      );
+      expect(watched.spillDirAtClose()).toBe(true);
+    });
+
+    /**
+     * Each call paused before its first engine step: the control-connection
+     * calls before their first statement there (the SQL gate's statement
+     * extraction, or the catalog read `drop` and `clear` open with), the
+     * calls with a connection of their own before it opens.
+     */
+    const calls: [
+      string,
+      { owner: object; method: string },
+      (provider: DuckdbProvider, canvasId: string) => Promise<unknown>,
+      unknown,
+    ][] = [
+      [
+        'query',
+        { owner: DuckDBConnection.prototype, method: 'extractStatements' },
+        (provider, id) => provider.query(id, 'SELECT label FROM t ORDER BY id', ctx),
+        { rows: LABELS, columns: ['label'], rowCount: 2 },
+      ],
+      [
+        'query({ registerAs })',
+        { owner: DuckDBConnection.prototype, method: 'extractStatements' },
+        (provider, id) =>
+          provider.query(id, 'SELECT label FROM t ORDER BY id', ctx, { registerAs: 'kept' }),
+        { rows: LABELS, columns: ['label'], rowCount: 2, tableName: 'kept' },
+      ],
+      [
+        'registerView',
+        { owner: DuckDBConnection.prototype, method: 'extractStatements' },
+        (provider, id) => provider.registerView(id, 'v', 'SELECT label FROM t', ctx),
+        { viewName: 'v', columns: ['label'] },
+      ],
+      [
+        'drop',
+        { owner: DuckDBConnection.prototype, method: 'runAndReadAll' },
+        (provider, id) => provider.drop(id, 't', ctx),
+        true,
+      ],
+      [
+        'clear',
+        { owner: DuckDBConnection.prototype, method: 'runAndReadAll' },
+        (provider, id) => provider.clear(id, ctx),
+        1,
+      ],
+      [
+        'registerTable',
+        { owner: DuckDBInstance.prototype, method: 'connect' },
+        (provider, id) => provider.registerTable(id, 'u', ROWS, ctx),
+        { tableName: 'u', rowCount: 2, columns: ['id', 'label'] },
+      ],
+      [
+        'export',
+        { owner: DuckDBInstance.prototype, method: 'connect' },
+        (provider, id) =>
+          provider.export(id, 't', { format: 'csv', stream: collectingStream().stream }, ctx),
+        { format: 'csv', rowCount: 2, sizeBytes: 24 },
+      ],
+      [
+        'describe',
+        { owner: DuckDBInstance.prototype, method: 'connect' },
+        (provider, id) => provider.describe(id, ctx),
+        [expect.objectContaining({ name: 't', kind: 'table', rowCount: 2 })],
+      ],
+    ];
+
+    it.each(calls)(
+      '%s settles with its own result, and the canvas closes once it does',
+      async (name, pause, run, expected) => {
+        const canvasId = `inflight-${name.replace(/\W/g, '')}`;
+        const { provider, watched } = await stagedCanvas(canvasId);
+        const paused = pauseCallsTo(pause.owner, pause.method);
+        const call = run(provider, canvasId);
+        await paused.reached;
+
+        await provider.destroyCanvas(canvasId, ctx);
+        expectNotClosed(watched);
+        expect(
+          await rejectionOf(() => provider.query(canvasId, 'SELECT 1 AS x', ctx)),
+        ).toMatchObject(notFound);
+
+        paused.release();
+        await expect(call).resolves.toEqual(expected);
+        await expectClosedInOrder(watched);
+      },
+    );
+
+    it('a query in flight when sweep() destroys its expired canvas resolves with its rows', async () => {
+      const { provider } = await makeProvider();
+      let now = 1_000_000;
+      const registry = new CanvasRegistry(
+        provider,
+        { ttlMs: 60_000, absoluteCapMs: 600_000, maxCanvasesPerTenant: 10, sweeperIntervalMs: 0 },
+        () => now,
+      );
+      const canvas = new DataCanvas(provider, registry);
+      const instance = await canvas.acquire(undefined, ctx);
+      await instance.registerTable('t', ROWS);
+      const watched = await watchTeardown(provider, instance.canvasId);
+      const paused = pauseCallsTo(DuckDBConnection.prototype, 'extractStatements');
+      const querying = instance.query('SELECT label FROM t ORDER BY id');
+      await paused.reached;
+
+      now += 60_001;
+      await registry.sweep();
+      expect(registry.totalActive()).toBe(0);
+      expectNotClosed(watched);
+
+      paused.release();
+      await expect(querying).resolves.toMatchObject({ rows: LABELS, rowCount: 2 });
+      await expectClosedInOrder(watched);
+    });
+
+    it('queries in flight across shutdown() resolve with their rows; shutdown returns first and the scratch directory goes after them', async () => {
+      const { parent, provider } = await makeProvider();
+      const ids = ['shutdown01', 'shutdown02'];
+      const watched: Watched[] = [];
+      for (const id of ids) {
+        await provider.initCanvas(id, ctx);
+        await provider.registerTable(id, 't', ROWS, ctx);
+        watched.push(await watchTeardown(provider, id));
+      }
+      const [scratch = ''] = await privateDirsUnder(parent);
+      const paused = pauseCallsTo(DuckDBConnection.prototype, 'extractStatements', ids.length);
+      const querying = ids.map((id) => provider.query(id, 'SELECT label FROM t ORDER BY id', ctx));
+      await paused.reached;
+
+      await provider.shutdown();
+      for (const each of watched) expectNotClosed(each);
+      expect(await readdir(parent)).toEqual([basename(scratch)]);
+
+      paused.release();
+      for (const query of querying) {
+        await expect(query).resolves.toMatchObject({ rows: LABELS, rowCount: 2 });
+      }
+      for (const each of watched) await expectClosedInOrder(each);
+      await vi.waitFor(async () => expect(await readdir(parent)).toEqual([]));
+    });
   });
 
   // #554 — a canvas whose creation straddles shutdown would come up bound to

@@ -7,6 +7,7 @@
  * @module tests/smoke/canvas-duckdb.test
  */
 
+import { execFile } from 'node:child_process';
 import { existsSync, rmSync, symlinkSync } from 'node:fs';
 import {
   lstat,
@@ -22,6 +23,7 @@ import {
 import { tmpdir } from 'node:os';
 import { basename, join, sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { promisify } from 'node:util';
 
 import {
   DuckDBAppender,
@@ -37,12 +39,15 @@ import { DataCanvas } from '@/services/canvas/core/DataCanvas.js';
 import {
   ALLOWED_PLAN_OPERATORS,
   collectDisallowedOperators,
+  INTERNAL_METADATA_VIEWS,
 } from '@/services/canvas/core/sqlGate.js';
 import { DuckdbProvider } from '@/services/canvas/providers/duckdb/DuckdbProvider.js';
 import * as exportWriter from '@/services/canvas/providers/duckdb/exportWriter.js';
-import type { ExportFormat } from '@/services/canvas/types.js';
+import type { DescribeOptions, ExportFormat } from '@/services/canvas/types.js';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import type { RequestContext } from '@/utils/internal/requestContext.js';
+
+const execFileAsync = promisify(execFile);
 
 const ctx: RequestContext = {
   requestId: 'smoke-canvas',
@@ -1946,6 +1951,44 @@ describe('canvas · DuckDB round trip', () => {
       expect(await rowsOf(instance, 'swapped')).toEqual([{ id: 10 }, { id: 11 }]);
     });
 
+    // The losing registration fails on the engine's write-write conflict, a
+    // DatabaseError carrying the engine message; the one in flight commits.
+    it.each([
+      ['a staged table', true],
+      ['a first registration', false],
+    ])(
+      'fails a registration racing another of the same name onto %s as a DatabaseError',
+      async (_label, staged) => {
+        const name = staged ? 'raced' : 'raced_fresh';
+        if (staged) await instance.registerTable(name, [{ id: 1 }], { schema: idSchema });
+        const { promise: released, resolve: release } = Promise.withResolvers<void>();
+        const { promise: halfway, resolve: reachHalfway } = Promise.withResolvers<void>();
+        async function* slow() {
+          yield { id: 10 };
+          reachHalfway();
+          await released;
+          yield { id: 11 };
+        }
+
+        const inFlight = instance.registerTable(name, slow(), { schema: idSchema });
+        await halfway;
+        const failure = await rejectionOf(
+          instance.registerTable(name, [{ id: 20 }], { schema: idSchema }),
+        );
+        release();
+        await expect(inFlight).resolves.toMatchObject({ rowCount: 2 });
+
+        expect(failure.code).toBe(JsonRpcErrorCode.DatabaseError);
+        expect(failure.data).toBeUndefined();
+        expect(failure.cause).toBeInstanceOf(Error);
+        expect(failure.message).toBe((failure.cause as Error).message);
+        expect(failure.message).toMatch(
+          /^TransactionContext Error: Catalog write-write conflict on /,
+        );
+        expect(await rowsOf(instance, name)).toEqual([{ id: 10 }, { id: 11 }]);
+      },
+    );
+
     it('closes a sync source it stops reading on a conversion failure (#661)', async () => {
       let closed = 0;
       // The sniffer types `n` BIGINT from its first rows; the bad value sits past
@@ -1997,6 +2040,71 @@ describe('canvas · DuckDB round trip', () => {
       "SELECT current_setting('threads')::INTEGER AS n",
     );
     expect(reader.getRowObjectsJson()).toEqual([{ n: Math.min(detected, 4) }]);
+  });
+
+  // DuckDB 2 adds an asynchronous I/O pool, `async_threads`, sized at four
+  // times the detected thread count, which `SET threads` does not reach (#870).
+  // DuckDB 1.5 has no such setting and refuses the option at create.
+  describe('the DuckDB 2 async I/O pool (#870)', () => {
+    const ENGINE_V1 = duckdbVersion().startsWith('v1.');
+
+    /** This process's thread count, as the OS reports it. */
+    async function processThreads(): Promise<number> {
+      if (process.platform === 'linux') {
+        const status = await readFile('/proc/self/status', 'utf8');
+        return Number(/^Threads:\s+(\d+)$/m.exec(status)?.[1]);
+      }
+      const { stdout } = await execFileAsync('ps', ['-M', '-p', String(process.pid)]);
+      // A header line, then one line per thread.
+      return stdout.trim().split('\n').length - 1;
+    }
+
+    it('creates each canvas engine with async_threads 1 on DuckDB 2, and without the option on DuckDB 1.5', async () => {
+      const create = vi.spyOn(DuckDBInstance, 'create');
+      try {
+        const instance = await canvas.acquire(undefined, ctx);
+        expect(create).toHaveBeenCalledTimes(1);
+        const config = create.mock.calls[0]?.[1];
+        if (ENGINE_V1) expect(config).not.toHaveProperty('async_threads');
+        else expect(config).toMatchObject({ async_threads: '1' });
+        await expect(instance.query('SELECT 1 AS x')).resolves.toMatchObject({ rows: [{ x: 1 }] });
+      } finally {
+        create.mockRestore();
+      }
+    });
+
+    it.skipIf(ENGINE_V1)('reads async_threads 1 on a DuckDB 2 canvas engine', async () => {
+      const instance = await canvas.acquire(undefined, ctx);
+      // biome-ignore lint/complexity/useLiteralKeys: deliberate access to the private record to read engine settings outside the gate.
+      const record = provider['canvases'].get(instance.canvasId)!;
+      const reader = await record.controlConnection.runAndReadAll(
+        "SELECT current_setting('async_threads')::INTEGER AS n",
+      );
+      expect(reader.getRowObjectsJson()).toEqual([{ n: 1 }]);
+    });
+
+    // Unbounded, each DuckDB 2 engine adds four threads per detected thread on top of its own.
+    it.runIf(process.platform === 'darwin' || process.platform === 'linux')(
+      'a canvas engine adds no more threads to the process than its engine thread count',
+      async () => {
+        const CANVASES = 3;
+        const SLACK = 8;
+        const before = await processThreads();
+        const engineThreads: number[] = [];
+        for (let i = 0; i < CANVASES; i += 1) {
+          const instance = await canvas.acquire(undefined, ctx);
+          // biome-ignore lint/complexity/useLiteralKeys: deliberate access to the private record to read engine settings outside the gate.
+          const record = provider['canvases'].get(instance.canvasId)!;
+          const reader = await record.controlConnection.runAndReadAll(
+            "SELECT current_setting('threads')::INTEGER AS n",
+          );
+          engineThreads.push((reader.getRowObjectsJson()[0] as { n: number }).n);
+        }
+        const after = await processThreads();
+        const bound = engineThreads.reduce((sum, n) => sum + n, 0) + SLACK;
+        expect(after - before).toBeLessThanOrEqual(bound);
+      },
+    );
   });
 
   // The engine reads and writes only under the export root and the canvas's
@@ -2412,6 +2520,580 @@ describe('canvas · DuckDB round trip', () => {
     const mcpErr = caught as McpError;
     expect(mcpErr.code).toBe(-32010);
     expect((mcpErr.data as { reason?: string } | undefined)?.reason).toBeUndefined();
+  });
+});
+
+/**
+ * DuckDB resolves a bare name in `main` before its own system views, so a
+ * staged object can carry a system view's name. The provider's catalog reads
+ * go through DuckDB's catalog table functions, which no staged name shadows,
+ * and its replace-step drops name the canvas's own database, so every such
+ * name stages through every create site and leaves the canvas working (#862).
+ */
+describe('canvas · objects named after DuckDB system views (#862)', () => {
+  let namesExportRoot: string;
+  let namesProvider: DuckdbProvider;
+  let namesCanvas: DataCanvas;
+  /** A clean canvas that imports come from and go to. */
+  let peer: CanvasInstance;
+
+  beforeAll(async () => {
+    namesExportRoot = await mkdtemp(join(tmpdir(), 'canvas-smoke-names-'));
+    namesProvider = new DuckdbProvider({
+      memoryLimitMb: 256,
+      exportRootPath: namesExportRoot,
+      defaultRowLimit: 1000,
+      schemaSniffRows: 100,
+    });
+    const registry = new CanvasRegistry(namesProvider, {
+      ttlMs: 60_000,
+      absoluteCapMs: 600_000,
+      maxCanvasesPerTenant: 10,
+      sweeperIntervalMs: 0,
+    });
+    namesCanvas = new DataCanvas(namesProvider, registry);
+    peer = await namesCanvas.acquire(undefined, ctx);
+    await peer.registerTable('seed', [{ v: 1 }, { v: 2 }]);
+  });
+
+  afterAll(async () => {
+    if (namesCanvas) await namesCanvas.shutdown(ctx);
+    await rm(namesExportRoot, { recursive: true, force: true });
+  });
+
+  /** A fresh canvas for `run`, dropped once it settles. */
+  async function onFreshCanvas(run: (instance: CanvasInstance) => Promise<void>): Promise<void> {
+    const instance = await namesCanvas.acquire(undefined, ctx);
+    try {
+      await run(instance);
+    } finally {
+      await namesCanvas.drop(instance.canvasId, ctx);
+    }
+  }
+
+  it('describe answers tables and views with their columns, types, nullability, and row counts', async () => {
+    await onFreshCanvas(async (instance) => {
+      await instance.registerTable(
+        'people',
+        [
+          { id: 1, name: 'a' },
+          { id: 2, name: null },
+        ],
+        {
+          schema: [
+            { name: 'id', type: 'INTEGER', nullable: false },
+            { name: 'name', type: 'VARCHAR' },
+          ],
+        },
+      );
+      await instance.registerView(
+        'named',
+        'SELECT id, upper(name) AS shout FROM people WHERE name IS NOT NULL',
+      );
+      const people = {
+        name: 'people',
+        kind: 'table',
+        rowCount: 2,
+        columns: [
+          { name: 'id', type: 'INTEGER', engineType: 'INTEGER', nullable: false },
+          { name: 'name', type: 'VARCHAR', engineType: 'VARCHAR', nullable: true },
+        ],
+      };
+      const named = {
+        name: 'named',
+        kind: 'view',
+        rowCount: 1,
+        columns: [
+          { name: 'id', type: 'INTEGER', engineType: 'INTEGER', nullable: true },
+          { name: 'shout', type: 'VARCHAR', engineType: 'VARCHAR', nullable: true },
+        ],
+      };
+      const describe = (options?: DescribeOptions) =>
+        namesProvider.describe(instance.canvasId, ctx, options);
+
+      expect(await describe()).toEqual([named, people]);
+      expect(await describe({ kind: 'view' })).toEqual([named]);
+      expect(await describe({ kind: 'table' })).toEqual([people]);
+      expect(await describe({ tableName: 'people' })).toEqual([people]);
+      expect(await describe({ tableName: 'named', kind: 'table' })).toEqual([]);
+      expect(await describe({ tableName: 'nobody' })).toEqual([]);
+    });
+  });
+
+  it('answers the existence and type checks as before', async () => {
+    await onFreshCanvas(async (source) => {
+      await onFreshCanvas(async (target) => {
+        await source.registerTable('people', [{ id: 1 }]);
+        await source.registerView('everyone', 'SELECT id FROM people');
+        await target.registerView('taken', 'SELECT 1 AS v');
+
+        expect(
+          await rejectionOf(source.query('SELECT 1 AS v', { registerAs: 'people' })),
+        ).toMatchObject({
+          code: JsonRpcErrorCode.ValidationError,
+          data: { reason: 'register_as_clash', tableName: 'people' },
+        });
+        expect(await rejectionOf(source.registerView('people', 'SELECT 1 AS v'))).toMatchObject({
+          code: JsonRpcErrorCode.ValidationError,
+          data: { reason: 'view_table_clash', name: 'people' },
+        });
+        expect(await rejectionOf(target.importFrom(source.canvasId, 'nobody'))).toMatchObject({
+          code: JsonRpcErrorCode.NotFound,
+          data: { reason: 'missing_table', sourceTableName: 'nobody' },
+        });
+        expect(
+          await rejectionOf(target.importFrom(source.canvasId, 'people', { asName: 'taken' })),
+        ).toMatchObject({
+          code: JsonRpcErrorCode.ValidationError,
+          data: { reason: 'import_view_clash', asName: 'taken' },
+        });
+        await expect(
+          source.registerView('everyone', 'SELECT id + 1 AS id FROM people'),
+        ).resolves.toEqual({ viewName: 'everyone', columns: ['id'] });
+        await expect(
+          target.importFrom(source.canvasId, 'everyone', { asName: 'copied' }),
+        ).resolves.toEqual({ tableName: 'copied', rowCount: 1, columns: ['id'] });
+
+        expect(await source.drop('nobody')).toBe(false);
+        expect(await source.drop('everyone')).toBe(true);
+        expect(await source.drop('people')).toBe(true);
+        expect(await source.describe()).toEqual([]);
+        expect(await target.clear()).toBe(2);
+        expect(await target.describe()).toEqual([]);
+      });
+    });
+  });
+
+  // Every internal metadata view, plus the two the catalog's own views read by
+  // name in another case.
+  const SYSTEM_VIEW_NAMES = [...INTERNAL_METADATA_VIEWS, 'DUCKDB_VIEWS', 'DUCKDB_COLUMNS'];
+  const ROUTES = ['registerTable', 'registerAs', 'registerView', 'importFrom'] as const;
+  const STAGED = [{ v: '1' }, { v: '2' }];
+
+  it.each(ROUTES.flatMap((route) => SYSTEM_VIEW_NAMES.map((name) => [route, name] as const)))(
+    'stages through %s as "%s" and leaves the canvas working',
+    async (route, name) => {
+      await onFreshCanvas(async (instance) => {
+        await instance.registerTable('t', [{ v: 1 }, { v: 2 }]);
+        if (route === 'registerTable') await instance.registerTable(name, [{ v: 1 }, { v: 2 }]);
+        if (route === 'registerAs') await instance.query('SELECT v FROM t', { registerAs: name });
+        if (route === 'registerView') await instance.registerView(name, 'SELECT v FROM t');
+        if (route === 'importFrom')
+          await instance.importFrom(peer.canvasId, 'seed', { asName: name });
+        const readBack = async () =>
+          (await instance.query(`SELECT v FROM ${JSON.stringify(name)} ORDER BY v`)).rows;
+        expect(await readBack()).toEqual(STAGED);
+
+        const kind = route === 'registerView' ? 'view' : 'table';
+        const entries = (await instance.describe()).map((info) => [info.name, info.kind]);
+        expect(entries.sort()).toEqual(
+          [
+            [name, kind],
+            ['t', 'table'],
+          ].sort(),
+        );
+        expect(await instance.describe({ tableName: name })).toMatchObject([
+          { name, kind, rowCount: 2, columns: [{ name: 'v', type: 'BIGINT' }] },
+        ]);
+
+        await expect(
+          instance.query('SELECT v FROM t', { registerAs: 'after' }),
+        ).resolves.toMatchObject({ tableName: 'after', rowCount: 2 });
+        await expect(instance.registerView('after_view', 'SELECT v FROM t')).resolves.toEqual({
+          viewName: 'after_view',
+          columns: ['v'],
+        });
+        const sink = new WritableStream<Uint8Array>();
+        await expect(instance.export(name, { format: 'csv', stream: sink })).resolves.toMatchObject(
+          { format: 'csv', rowCount: 2 },
+        );
+        await expect(
+          instance.importFrom(peer.canvasId, 'seed', { asName: 'imported' }),
+        ).resolves.toMatchObject({ tableName: 'imported', rowCount: 2 });
+        await expect(
+          peer.importFrom(instance.canvasId, name, { asName: 'copied' }),
+        ).resolves.toMatchObject({ tableName: 'copied', rowCount: 2 });
+        if (kind === 'table') {
+          await instance.registerTable(name, [{ v: 3 }]);
+          expect(await readBack()).toEqual([{ v: '3' }]);
+        }
+
+        expect(await instance.drop(name)).toBe(true);
+        expect(await instance.clear()).toBe(4);
+        expect(await instance.describe()).toEqual([]);
+      });
+    },
+  );
+});
+
+/**
+ * `query({ registerAs })` checks that its name is free, then runs `CREATE TABLE
+ * … AS` on a connection of its own; `registerView()` checks that no table holds
+ * its name, then runs `CREATE OR REPLACE VIEW`. Both checks read the name
+ * exactly, and the engine reads it in any letter case. A name staged between
+ * the check and the DDL, or staged in another case, makes the engine refuse
+ * the DDL, which the call reports as the clash its check reports (#891).
+ */
+describe('canvas · a name staged while registerAs or registerView runs (#891)', () => {
+  let clashExportRoot: string;
+  let clashCanvas: DataCanvas;
+
+  const REGISTER_AS_CLASH_HINT =
+    "A table or view with this name is already staged on the canvas. Use another name for the result, or query the staged one if it holds what you need — list what is staged with this server's dataframe-describe tool.";
+  const VIEW_TABLE_CLASH_HINT = 'Choose another name for the view, or drop the table first.';
+  /** The engine's refusal of a CTAS whose name another call took first. */
+  const NAME_TAKEN =
+    /^(?:Catalog Error: (?:Table|View) with name .+ already exists!|TransactionContext Error: Catalog write-write conflict on )/;
+  const VIEW_OVER_TABLE =
+    /^Catalog Error: Existing object .+ is of type Table, trying to replace with type View/;
+  const idSchema = [{ name: 'id', type: 'INTEGER' as const }];
+
+  beforeAll(async () => {
+    clashExportRoot = await mkdtemp(join(tmpdir(), 'canvas-smoke-clash-'));
+    const clashProvider = new DuckdbProvider({
+      memoryLimitMb: 256,
+      exportRootPath: clashExportRoot,
+      defaultRowLimit: 1000,
+      schemaSniffRows: 100,
+    });
+    const registry = new CanvasRegistry(clashProvider, {
+      ttlMs: 60_000,
+      absoluteCapMs: 600_000,
+      maxCanvasesPerTenant: 10,
+      sweeperIntervalMs: 0,
+    });
+    clashCanvas = new DataCanvas(clashProvider, registry);
+  });
+
+  afterAll(async () => {
+    vi.restoreAllMocks();
+    if (clashCanvas) await clashCanvas.shutdown(ctx);
+    await rm(clashExportRoot, { recursive: true, force: true });
+  });
+
+  /** A fresh canvas for `run`, dropped once it settles. */
+  async function onFreshCanvas(run: (instance: CanvasInstance) => Promise<void>): Promise<void> {
+    const instance = await clashCanvas.acquire(undefined, ctx);
+    try {
+      await run(instance);
+    } finally {
+      await clashCanvas.drop(instance.canvasId, ctx);
+    }
+  }
+
+  /**
+   * Holds the first statement a connection is given through `method` that opens
+   * with `prefix` until `release()`, then runs it; every other statement runs as
+   * it comes.
+   */
+  function pauseStatement(method: 'run' | 'start', prefix: string) {
+    const original = DuckDBConnection.prototype[method] as (
+      this: DuckDBConnection,
+      ...args: unknown[]
+    ) => Promise<unknown>;
+    const { promise: reached, resolve: reach } = Promise.withResolvers<void>();
+    const { promise: released, resolve: release } = Promise.withResolvers<void>();
+    let held = false;
+    const spy = vi.spyOn(DuckDBConnection.prototype, method).mockImplementation(async function (
+      this: DuckDBConnection,
+      ...args: unknown[]
+    ) {
+      if (!held && typeof args[0] === 'string' && args[0].startsWith(prefix)) {
+        held = true;
+        reach();
+        await released;
+      }
+      return await original.apply(this, args);
+    } as never);
+    return { reached, release, restore: () => spy.mockRestore() };
+  }
+
+  function expectRegisterAsClash(error: McpError, tableName: string, engine?: RegExp): void {
+    expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(error.message).toBe(
+      `Canvas table "${tableName}" already exists. Drop it before reusing the name.`,
+    );
+    expect(error.data).toEqual({
+      reason: 'register_as_clash',
+      tableName,
+      recovery: { hint: REGISTER_AS_CLASH_HINT },
+    });
+    expect(error.literals).toEqual([tableName]);
+    if (engine) expect((error.cause as Error).message).toMatch(engine);
+  }
+
+  /**
+   * A registerAs of `df_SAME` that lost a race: refused by the name check when
+   * the winner had committed, by the engine's CTAS when it had not.
+   */
+  function expectRaceLoser(error: McpError): void {
+    expectRegisterAsClash(error, 'df_SAME');
+    if (error.cause !== undefined) expect((error.cause as Error).message).toMatch(NAME_TAKEN);
+  }
+
+  function expectViewTableClash(error: McpError, name: string, engine?: RegExp): void {
+    expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+    expect(error.message).toBe(
+      `Canvas already contains a base table named "${name}". Drop the table or choose a different name.`,
+    );
+    expect(error.data).toEqual({
+      reason: 'view_table_clash',
+      name,
+      recovery: { hint: VIEW_TABLE_CLASH_HINT },
+    });
+    expect(error.literals).toEqual([name]);
+    if (engine) expect((error.cause as Error).message).toMatch(engine);
+  }
+
+  /** Each staged object's name and kind, in name order. */
+  async function staged(instance: CanvasInstance): Promise<[string, string][]> {
+    return (await instance.describe()).map((info) => [info.name, info.kind]);
+  }
+
+  it.each([
+    ['table', (on: CanvasInstance) => on.registerTable('taken', [{ id: 1 }])],
+    [
+      'view',
+      async (on: CanvasInstance) => {
+        await on.registerView('taken', 'SELECT 1 AS id');
+      },
+    ],
+  ] as const)(
+    'rejects a registerAs onto a staged %s with register_as_clash and its hint',
+    async (kind, stage) => {
+      await onFreshCanvas(async (instance) => {
+        await stage(instance);
+        expectRegisterAsClash(
+          await rejectionOf(instance.query('SELECT 2 AS id', { registerAs: 'taken' })),
+          'taken',
+        );
+        expect(await staged(instance)).toEqual([['taken', kind]]);
+      });
+    },
+  );
+
+  it.each([
+    ['table', (on: CanvasInstance) => on.registerTable('CaseT', [{ id: 1 }])],
+    [
+      'view',
+      async (on: CanvasInstance) => {
+        await on.registerView('CaseT', 'SELECT 1 AS id');
+      },
+    ],
+  ] as const)(
+    'rejects a registerAs whose name differs from a staged %s only in letter case',
+    async (kind, stage) => {
+      await onFreshCanvas(async (instance) => {
+        await stage(instance);
+        expectRegisterAsClash(
+          await rejectionOf(instance.query('SELECT 2 AS id', { registerAs: 'caset' })),
+          'caset',
+          NAME_TAKEN,
+        );
+        expect(await staged(instance)).toEqual([['CaseT', kind]]);
+      });
+    },
+  );
+
+  it.each([
+    [
+      'a registered table',
+      'table',
+      (on: CanvasInstance) => on.registerTable('df_paused', [{ who: 'other' }]),
+    ],
+    [
+      'a registered view',
+      'view',
+      (on: CanvasInstance) => on.registerView('df_paused', "SELECT 'other' AS who"),
+    ],
+    [
+      'another registerAs',
+      'table',
+      (on: CanvasInstance) => on.query("SELECT 'other' AS who", { registerAs: 'df_paused' }),
+    ],
+  ] as const)(
+    'rejects a registerAs with register_as_clash when %s takes its name before its CTAS runs',
+    async (_label, kind, competitor) => {
+      await onFreshCanvas(async (instance) => {
+        const pause = pauseStatement('start', 'CREATE TABLE "df_paused" AS ');
+        try {
+          const waiting = rejectionOf(
+            instance.query("SELECT 'mine' AS who", { registerAs: 'df_paused' }),
+          );
+          await pause.reached;
+          await competitor(instance);
+          pause.release();
+          expectRegisterAsClash(await waiting, 'df_paused', NAME_TAKEN);
+        } finally {
+          pause.restore();
+        }
+        // The losing call left the winner's object in place.
+        expect(await staged(instance)).toEqual([['df_paused', kind]]);
+        expect((await instance.query('SELECT who FROM df_paused')).rows).toEqual([
+          { who: 'other' },
+        ]);
+      });
+    },
+  );
+
+  it('rejects a registerAs with register_as_clash when a registration of its name is still in flight', async () => {
+    await onFreshCanvas(async (instance) => {
+      const { promise: released, resolve: release } = Promise.withResolvers<void>();
+      const { promise: halfway, resolve: reachHalfway } = Promise.withResolvers<void>();
+      async function* slow() {
+        yield { id: 10 };
+        reachHalfway();
+        await released;
+        yield { id: 11 };
+      }
+      const inFlight = instance.registerTable('df_flight', slow(), { schema: idSchema });
+      await halfway;
+      const failure = await rejectionOf(
+        instance.query('SELECT 1 AS id', { registerAs: 'df_flight' }),
+      );
+      release();
+      await expect(inFlight).resolves.toMatchObject({ rowCount: 2 });
+
+      expectRegisterAsClash(
+        failure,
+        'df_flight',
+        /^TransactionContext Error: Catalog write-write conflict on /,
+      );
+      expect((await instance.query('SELECT id FROM df_flight ORDER BY id')).rows).toEqual([
+        { id: 10 },
+        { id: 11 },
+      ]);
+    });
+  });
+
+  it('fulfills one of three registerAs calls racing for one name, the others register_as_clash', async () => {
+    const sql = (who: number) => `SELECT i, ${who} AS who FROM generate_series(1, 50000) t(i)`;
+    let refusedByEngine = 0;
+    for (let round = 0; round < 30; round++) {
+      await onFreshCanvas(async (instance) => {
+        const settled = await Promise.allSettled(
+          [0, 1, 2].map((who) => instance.query(sql(who), { registerAs: 'df_SAME', rowLimit: 5 })),
+        );
+        expect(settled.filter((s) => s.status === 'fulfilled')).toHaveLength(1);
+        for (const s of settled) {
+          if (s.status === 'rejected') {
+            expect(s.reason).toBeInstanceOf(McpError);
+            expectRaceLoser(s.reason as McpError);
+            if ((s.reason as McpError).cause !== undefined) refusedByEngine++;
+          }
+        }
+        expect((await instance.query('SELECT count(*) AS n FROM df_SAME')).rows).toEqual([
+          { n: '50000' },
+        ]);
+      });
+    }
+    // The rounds raced: some losers got past the name check and failed at the CTAS.
+    expect(refusedByEngine).toBeGreaterThan(0);
+  }, 120_000);
+
+  it('rejects whichever of a racing registerAs and registerView of one name loses with its clash', async () => {
+    for (let round = 0; round < 30; round++) {
+      await onFreshCanvas(async (instance) => {
+        const [asTable, asView] = await Promise.allSettled([
+          instance.query('SELECT i FROM generate_series(1, 50000) t(i)', {
+            registerAs: 'df_SAME',
+            rowLimit: 5,
+          }),
+          instance.registerView('df_SAME', 'SELECT 1 AS i'),
+        ]);
+        expect(
+          [asTable.status, asView.status].filter((status) => status === 'fulfilled'),
+        ).toHaveLength(1);
+        if (asTable.status === 'rejected') {
+          expectRaceLoser(asTable.reason as McpError);
+          expect(await staged(instance)).toEqual([['df_SAME', 'view']]);
+        }
+        if (asView.status === 'rejected') {
+          const failure = asView.reason as McpError;
+          expect(failure).toBeInstanceOf(McpError);
+          // A view losing the catalog write itself stays the engine's conflict, a DatabaseError.
+          if (failure.code === JsonRpcErrorCode.DatabaseError) {
+            expect(failure.data).toBeUndefined();
+            expect(failure.message).toMatch(
+              /^TransactionContext Error: Catalog write-write conflict on /,
+            );
+          } else {
+            expectViewTableClash(failure, 'df_SAME');
+          }
+          expect(await staged(instance)).toEqual([['df_SAME', 'table']]);
+        }
+      });
+    }
+  }, 120_000);
+
+  it('rejects a registerView onto a staged table with view_table_clash and its hint', async () => {
+    await onFreshCanvas(async (instance) => {
+      await instance.registerTable('taken', [{ id: 1 }]);
+      expectViewTableClash(
+        await rejectionOf(instance.registerView('taken', 'SELECT 2 AS id')),
+        'taken',
+      );
+      expect(await staged(instance)).toEqual([['taken', 'table']]);
+    });
+  });
+
+  it('rejects a registerView whose name differs from a staged table only in letter case', async () => {
+    await onFreshCanvas(async (instance) => {
+      await instance.registerTable('CaseT', [{ id: 1 }]);
+      expectViewTableClash(
+        await rejectionOf(instance.registerView('caset', 'SELECT 2 AS id')),
+        'caset',
+        VIEW_OVER_TABLE,
+      );
+      expect(await staged(instance)).toEqual([['CaseT', 'table']]);
+    });
+  });
+
+  // The import's existence check reads the name exactly too; the replace step's
+  // drop is what the engine refuses (v2.0.1 quotes the name, v1.5.6 does not).
+  it('rejects an importFrom whose asName differs from a staged view only in letter case', async () => {
+    await onFreshCanvas(async (source) => {
+      await onFreshCanvas(async (target) => {
+        await source.registerTable('src', [{ id: 1 }]);
+        await target.registerView('CaseV', 'SELECT 2 AS id');
+        const failure = await rejectionOf(
+          target.importFrom(source.canvasId, 'src', { asName: 'casev' }),
+        );
+        expect(failure.code).toBe(JsonRpcErrorCode.ValidationError);
+        expect(failure.message).toBe(
+          'Target canvas already contains a view named "casev". Drop the view or choose a different name.',
+        );
+        expect(failure.data).toEqual({
+          reason: 'import_view_clash',
+          asName: 'casev',
+          recovery: {
+            hint: 'Drop the existing view first, or choose a different destination name for the imported table.',
+          },
+        });
+        expect(failure.literals).toEqual(['casev']);
+        expect((failure.cause as Error).message).toMatch(
+          /^Catalog Error: Existing object .+ is of type View, trying to drop type Table/,
+        );
+        expect(await staged(target)).toEqual([['CaseV', 'view']]);
+      });
+    });
+  });
+
+  it('rejects a registerView with view_table_clash when a table takes its name before its DDL runs', async () => {
+    await onFreshCanvas(async (instance) => {
+      const pause = pauseStatement('run', 'CREATE OR REPLACE VIEW "v_paused" ');
+      try {
+        const waiting = rejectionOf(instance.registerView('v_paused', "SELECT 'mine' AS who"));
+        await pause.reached;
+        await instance.registerTable('v_paused', [{ who: 'other' }]);
+        pause.release();
+        expectViewTableClash(await waiting, 'v_paused', VIEW_OVER_TABLE);
+      } finally {
+        pause.restore();
+      }
+      expect(await staged(instance)).toEqual([['v_paused', 'table']]);
+      expect((await instance.query('SELECT who FROM v_paused')).rows).toEqual([{ who: 'other' }]);
+    });
   });
 });
 

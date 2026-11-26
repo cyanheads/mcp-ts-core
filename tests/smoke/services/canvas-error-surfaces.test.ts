@@ -22,10 +22,8 @@ import type { CanvasInstance } from '@/services/canvas/core/CanvasInstance.js';
 import { CanvasRegistry } from '@/services/canvas/core/CanvasRegistry.js';
 import { DataCanvas } from '@/services/canvas/core/DataCanvas.js';
 import { assertPlanReadOnly } from '@/services/canvas/core/sqlGate.js';
-import {
-  classifyDuckdbError,
-  DuckdbProvider,
-} from '@/services/canvas/providers/duckdb/DuckdbProvider.js';
+import { DuckdbProvider } from '@/services/canvas/providers/duckdb/DuckdbProvider.js';
+import { classifyDuckdbError } from '@/services/canvas/providers/duckdb/duckdbErrors.js';
 import { runToolContract } from '@/testing/index.js';
 import type { RequestContext } from '@/utils/internal/requestContext.js';
 
@@ -43,6 +41,7 @@ const CASES = [
   'invalid_sql_parse',
   'invalid_sql_catalog',
   'invalid_sql_argument',
+  'invalid_sql_conversion',
   'sql_read_only_absent_file',
   'denied_function',
   'denied_function_in_plan',
@@ -55,6 +54,7 @@ const CASES = [
   'missing_table_import',
   'sql_execution_error',
   'sql_execution_error_input',
+  'sql_execution_error_argument',
   'sql_execution_error_range',
   'sql_parse_error',
   'sql_parse_error_extraction',
@@ -63,6 +63,8 @@ const CASES = [
   'sql_read_only_file_reference',
   'denied_function_setting_read',
   'view_unreadable',
+  'register_as_clash',
+  'view_table_clash',
   'export_out_of_memory',
 ] as const;
 
@@ -109,8 +111,12 @@ const canvasProbe = tool('canvas_probe', {
       case 'invalid_sql_catalog':
         await workspace.query('SELECT id FROM probe ORDER BY id::VARCHAR COLLATE nosuchcoll');
         break;
+      // Both constants fail as the statement is prepared on every engine line.
       case 'invalid_sql_argument':
-        await workspace.query("SELECT regexp_matches('a', '(') AS m");
+        await workspace.query("SELECT strptime('2020-01-01', '%Q') AS m");
+        break;
+      case 'invalid_sql_conversion':
+        await workspace.query("SELECT date_trunc('fortnight', DATE '2020-01-01') AS m");
         break;
       // A file reference under the export root is refused the same way
       // whether or not the file is there.
@@ -155,6 +161,10 @@ const canvasProbe = tool('canvas_probe', {
       case 'sql_execution_error_input':
         await workspace.query("SELECT strptime(amount, '%Y') AS d FROM probe_text");
         break;
+      // A constant the function rejects only as it runs, on every engine line.
+      case 'sql_execution_error_argument':
+        await workspace.query("SELECT format('{', 1) AS m");
+        break;
       case 'sql_execution_error_range':
         await workspace.query('SELECT id + 9223372036854775807 AS n FROM probe');
         break;
@@ -193,6 +203,12 @@ const canvasProbe = tool('canvas_probe', {
         await workspace.registerView('probe_unreadable', 'SELECT * FROM range(0, 10, 0)');
         await workspace.describe({ tableName: 'probe_unreadable' });
         break;
+      case 'register_as_clash':
+        await workspace.query('SELECT 1 AS id', { registerAs: 'probe' });
+        break;
+      case 'view_table_clash':
+        await workspace.registerView('probe', 'SELECT 1 AS id');
+        break;
       // A JSON export holds about 13 copies of 2,048 rows as JSON text: 16 KB
       // rows need more than the 256 MB canvas holds.
       case 'export_out_of_memory':
@@ -209,6 +225,22 @@ const SQL_READ_ONLY_HINT =
 /** A parser error's recovery, as `sql_parse_error` and as a SELECT's `invalid_sql`: syntax, never a column or function. */
 const PARSE_HINT =
   'Fix the SQL syntax the message names and send a single read-only SELECT. Put AS before an alias that is a SQL keyword, or double-quote it.';
+
+/** The recovery for a constant a function rejects as the statement is prepared. */
+const CONSTANT_ARGUMENT_HINT =
+  'Correct the argument value the message names — a pattern, format string, or other constant the function cannot accept.';
+
+/** The recovery for an argument a function rejects as it runs: a constant in the SQL, or a row's value. */
+const EXECUTION_INPUT_HINT =
+  'Correct the argument the message names if it is a constant in the SQL, such as a regex pattern or format string; otherwise filter out the rows whose values the function cannot read, or use the function’s TRY variant where it has one, such as TRY_CAST or TRY_STRPTIME.';
+
+const REGISTER_AS_CLASH_HINT =
+  "A table or view with this name is already staged on the canvas. Use another name for the result, or query the staged one if it holds what you need — list what is staged with this server's dataframe-describe tool.";
+
+const VIEW_TABLE_CLASH_HINT = 'Choose another name for the view, or drop the table first.';
+
+const MISSING_TABLE_HINT =
+  "Re-run the tool that produced this table to stage it again, or list the currently staged tables with this server's dataframe-describe tool.";
 
 /** Expected `data.reason` and `data.recovery.hint` for each probe. */
 const EXPECTED: Record<ProbeCase, { hint: string; reason: string }> = {
@@ -233,10 +265,8 @@ const EXPECTED: Record<ProbeCase, { hint: string; reason: string }> = {
     reason: 'invalid_sql',
     hint: "Correct the function, type, collation, or schema name the message reports missing — list the staged tables with this server's dataframe-describe tool.",
   },
-  invalid_sql_argument: {
-    reason: 'invalid_sql',
-    hint: 'Correct the argument value the message names — a pattern, format string, or other constant the function cannot accept.',
-  },
+  invalid_sql_argument: { reason: 'invalid_sql', hint: CONSTANT_ARGUMENT_HINT },
+  invalid_sql_conversion: { reason: 'invalid_sql', hint: CONSTANT_ARGUMENT_HINT },
   sql_read_only_absent_file: { reason: 'sql_read_only', hint: SQL_READ_ONLY_HINT },
   denied_function: {
     reason: 'denied_function',
@@ -282,10 +312,8 @@ const EXPECTED: Record<ProbeCase, { hint: string; reason: string }> = {
     reason: 'sql_execution_error',
     hint: 'Wrap the cast in TRY_CAST, or filter out the rows the message names before converting them.',
   },
-  sql_execution_error_input: {
-    reason: 'sql_execution_error',
-    hint: 'Filter out the rows whose values the function cannot read, or use the function’s TRY variant where it has one, such as TRY_CAST or TRY_STRPTIME.',
-  },
+  sql_execution_error_input: { reason: 'sql_execution_error', hint: EXECUTION_INPUT_HINT },
+  sql_execution_error_argument: { reason: 'sql_execution_error', hint: EXECUTION_INPUT_HINT },
   sql_execution_error_range: {
     reason: 'sql_execution_error',
     hint: 'Cast to a wider type such as HUGEINT or DOUBLE before the arithmetic that overflows, or filter out the rows whose values are out of range.',
@@ -308,11 +336,142 @@ const EXPECTED: Record<ProbeCase, { hint: string; reason: string }> = {
     reason: 'view_unreadable',
     hint: 'Drop each view the message names, or define it again over the tables as now staged.',
   },
+  register_as_clash: { reason: 'register_as_clash', hint: REGISTER_AS_CLASH_HINT },
+  view_table_clash: { reason: 'view_table_clash', hint: VIEW_TABLE_CLASH_HINT },
   export_out_of_memory: {
     reason: 'export_out_of_memory',
     hint: 'A JSON export needs roughly 26 MB of canvas memory per KB of row width, since it holds about 13 copies of 2,048 rows as JSON text at once. Export as CSV or Parquet, which need far less, or export a selection that leaves out the widest columns.',
   },
 };
+
+/** Failures whose message quotes a table or view name the caller sends back (#863). */
+const NAME_CASES = [
+  'missing_table_query',
+  'missing_table_quoted',
+  'missing_table_export_view',
+  'register_as_clash',
+  'view_table_clash',
+  'import_source_missing',
+  'import_view_clash',
+] as const;
+
+type NameCase = (typeof NAME_CASES)[number];
+
+/** A canvas holding the tables and views the name probes collide with or miss. */
+let names: CanvasInstance;
+/** A canvas whose only objects are two views describe() cannot read. */
+let unreadableViews: CanvasInstance;
+
+const canvasNameProbe = tool('canvas_name_probe', {
+  description: 'Drives one canvas failure that quotes a table or view name.',
+  annotations: { readOnlyHint: true },
+  input: z.object({
+    probe: z
+      .enum([...NAME_CASES, 'view_unreadable'])
+      .describe('Which name-quoting failure to trigger'),
+  }),
+  output: z.object({
+    unreachable: z.boolean().describe('Never returned — every probe throws instead'),
+  }),
+  async handler(input) {
+    switch (input.probe) {
+      case 'missing_table_query':
+        await names.query('SELECT * FROM cpi__2024');
+        break;
+      case 'missing_table_quoted':
+        await names.query('SELECT * FROM "my__t able"');
+        break;
+      // The view's table is dropped, so the export's read of the view misses it.
+      case 'missing_table_export_view':
+        await names.export('v__gone', { format: 'csv', path: 'v__gone.csv' });
+        break;
+      case 'register_as_clash':
+        await names.query('SELECT 1 AS id', { registerAs: 'obs__2024' });
+        break;
+      case 'view_table_clash':
+        await names.registerView('obs__2024', 'SELECT 1 AS id');
+        break;
+      case 'import_source_missing':
+        await names.importFrom(importSource.canvasId, 'no__such');
+        break;
+      case 'import_view_clash':
+        await names.importFrom(importSource.canvasId, 'src__t', { asName: 'v__x' });
+        break;
+      case 'view_unreadable':
+        await unreadableViews.describe();
+        break;
+    }
+    return { unreachable: true };
+  },
+});
+
+/** The raw message, the `content[]` line it renders as, and the `data` of each name probe. */
+function expectedNameFailure(probe: NameCase): {
+  data: Record<string, unknown>;
+  line: string;
+  message: string;
+} {
+  const missingTable = (tableName: string) => ({
+    message: `Canvas table "${tableName}" does not exist. The table may have expired, been dropped, or the name may be mistyped.`,
+    line: `Error: Canvas table "\`${tableName}\`" does not exist. The table may have expired, been dropped, or the name may be mistyped.`,
+    data: { reason: 'missing_table', tableName, recovery: { hint: MISSING_TABLE_HINT } },
+  });
+  switch (probe) {
+    case 'missing_table_query':
+      return missingTable('cpi__2024');
+    case 'missing_table_quoted':
+      return missingTable('my__t able');
+    case 'missing_table_export_view':
+      return missingTable('gone__base');
+    case 'register_as_clash':
+      return {
+        message: 'Canvas table "obs__2024" already exists. Drop it before reusing the name.',
+        line: 'Error: Canvas table "`obs__2024`" already exists. Drop it before reusing the name.',
+        data: {
+          reason: 'register_as_clash',
+          tableName: 'obs__2024',
+          recovery: { hint: REGISTER_AS_CLASH_HINT },
+        },
+      };
+    case 'view_table_clash':
+      return {
+        message:
+          'Canvas already contains a base table named "obs__2024". Drop the table or choose a different name.',
+        line: 'Error: Canvas already contains a base table named "`obs__2024`". Drop the table or choose a different name.',
+        data: {
+          reason: 'view_table_clash',
+          name: 'obs__2024',
+          recovery: { hint: VIEW_TABLE_CLASH_HINT },
+        },
+      };
+    case 'import_source_missing':
+      return {
+        message: 'Source canvas does not contain a table or view named "no__such".',
+        line: 'Error: Source canvas does not contain a table or view named "`no__such`".',
+        data: {
+          reason: 'missing_table',
+          sourceCanvasId: importSource.canvasId,
+          sourceTableName: 'no__such',
+          recovery: {
+            hint: "Re-check the source table name, or list the tables staged on the source canvas with this server's dataframe-describe tool.",
+          },
+        },
+      };
+    case 'import_view_clash':
+      return {
+        message:
+          'Target canvas already contains a view named "v__x". Drop the view or choose a different name.',
+        line: 'Error: Target canvas already contains a view named "`v__x`". Drop the view or choose a different name.',
+        data: {
+          reason: 'import_view_clash',
+          asName: 'v__x',
+          recovery: {
+            hint: 'Drop the existing view first, or choose a different destination name for the imported table.',
+          },
+        },
+      };
+  }
+}
 
 /** Framework API a caller holding only MCP tools cannot invoke. */
 const FRAMEWORK_INTERNALS =
@@ -360,6 +519,17 @@ describe('canvas · error surfaces (#299, #451)', () => {
       registerAs: 'probe_wide',
       preview: 0,
     });
+
+    names = await canvas.acquire(undefined, ctx);
+    await names.registerTable('obs__2024', [{ id: 1 }]);
+    await names.registerView('v__x', 'SELECT id FROM obs__2024');
+    await names.registerTable('gone__base', [{ id: 1 }]);
+    await names.registerView('v__gone', 'SELECT id FROM gone__base');
+    await names.drop('gone__base');
+    await importSource.registerTable('src__t', [{ id: 1 }]);
+    unreadableViews = await canvas.acquire(undefined, ctx);
+    await unreadableViews.registerView('v__reads', 'SELECT * FROM range(0, 10, 0)');
+    await unreadableViews.registerView('v__also', 'SELECT * FROM range(0, 10, 0)');
   });
 
   afterAll(async () => {
@@ -394,5 +564,37 @@ describe('canvas · error surfaces (#299, #451)', () => {
       if (FRAMEWORK_INTERNALS.test(text)) offenders.push(`${probe}: ${text}`);
     }
     expect(offenders).toEqual([]);
+  });
+
+  describe('a table or view name the message quotes (#863)', () => {
+    it.each(NAME_CASES)(
+      '%s renders the name as code in content[] and keeps it raw in structuredContent',
+      async (probe) => {
+        const expected = expectedNameFailure(probe);
+        const result = await runToolContract(canvasNameProbe, { probe });
+
+        expect(result.isError).toBe(true);
+        expect(renderedText(result).split('\n')[0]).toBe(expected.line);
+        const error = envelope(result);
+        expect(error.message).toBe(expected.message);
+        expect(error.data).toEqual(expected.data);
+      },
+    );
+
+    it('renders each view a view_unreadable message names as code', async () => {
+      const result = await runToolContract(canvasNameProbe, { probe: 'view_unreadable' });
+
+      const error = envelope(result);
+      const views = (error.data as { views: { engineMessage: string; name: string }[] }).views;
+      expect(views.map((view) => view.name)).toEqual(['v__also', 'v__reads']);
+      // The engine's own text, `Binder Error: interval cannot be 0!`, holds nothing to escape.
+      const [also, reads] = views.map((view) => view.engineMessage);
+      expect(renderedText(result).split('\n')[0]).toBe(
+        `Error: Canvas views could not be read: "\`v__also\`" — ${also}; "\`v__reads\`" — ${reads}`,
+      );
+      expect(error.message).toBe(
+        `Canvas views could not be read: "v__also" — ${also}; "v__reads" — ${reads}`,
+      );
+    });
   });
 });

@@ -40,11 +40,10 @@ export {
   type SqlGateReason,
 } from './core/sqlGate.js';
 export {
-  DUCKDB_ERROR_REASONS,
-  type DuckdbErrorReason,
   DuckdbProvider,
   type DuckdbProviderOptions,
 } from './providers/duckdb/DuckdbProvider.js';
+export { DUCKDB_ERROR_REASONS, type DuckdbErrorReason } from './providers/duckdb/duckdbErrors.js';
 export {
   type SpilloverFitResult,
   type SpilloverOptions,

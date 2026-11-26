@@ -54,7 +54,6 @@ import type {
   ColumnSchema,
   ColumnType,
   DescribeOptions,
-  ExportFormat,
   ExportOptions,
   ExportResult,
   ExportTarget,
@@ -68,6 +67,23 @@ import type {
   RegisterViewResult,
   TableInfo,
 } from '../../types.js';
+import {
+  catalogMissName,
+  classifyDuckdbError,
+  DUCKDB_ERROR_REASONS,
+  exportOutOfMemory,
+  isCtasNameTaken,
+  isDropOverView,
+  isViewOverTable,
+  missingTableError,
+  prepareFailureRecovery,
+  redactPaths,
+  registerAsClash,
+  SQL_READ_ONLY_RECOVERY,
+  VIEW_READ_FAILURE,
+  viewTableClash,
+  viewUnreadableError,
+} from './duckdbErrors.js';
 import {
   copyFormatClause,
   exportStagingPath,
@@ -96,7 +112,9 @@ type DuckDBDateValue = InstanceType<DuckDBModule['DuckDBDateValue']>;
  * that keeps its result, runs on every engine thread, each holding working
  * memory inside `memory_limit`. An export, and the copy an `importFrom()`
  * stages, runs on one thread whatever the count — see
- * {@link singleWriterCopySource}.
+ * {@link singleWriterCopySource}. The cap sets `threads`, which DuckDB 2's
+ * asynchronous I/O pool does not follow; `initCanvas` sizes that pool at
+ * create (#870).
  */
 const MEMORY_MB_PER_THREAD = 64;
 
@@ -148,6 +166,8 @@ interface CallConnection extends StatementReader {
 interface CanvasRecord {
   /** Long-lived connection for DDL, catalog lookups, and the SQL gate's parse and EXPLAIN. */
   controlConnection: DuckDBConnection;
+  /** The canvas database's own name, `current_database()` — see {@link ownTableName}. */
+  database: string;
   /** This canvas's share of the provider's holds, one per call still running on it — see {@link DuckdbProvider.holdCanvas}. */
   holds: Set<Promise<void>>;
   instance: DuckDBInstance;
@@ -163,6 +183,8 @@ export class DuckdbProvider implements IDataCanvasProvider {
   private readonly canvases = new Map<string, CanvasRecord>();
   /** One pending promise per held canvas record, resolved on release — see {@link holdCanvas}. */
   private readonly holds = new Set<Promise<void>>();
+  /** Each destroyed canvas's close still waiting on a call in flight, settled once it has run — see {@link destroyCanvas}. */
+  private readonly closing = new Set<Promise<void>>();
   /** The private scratch directory once first requested — see {@link ensureTempRoot}. */
   private tempRoot: Promise<string> | undefined;
 
@@ -226,6 +248,11 @@ export class DuckdbProvider implements IDataCanvasProvider {
       // DuckDB v2.0 refuses the `x -> x + 1` lambda arrow by default; this keeps
       // it beside `lambda x: x + 1`, as v1.5 accepts both.
       lambda_syntax: 'ENABLE_SINGLE_ARROW',
+      // DuckDB v2.0 adds an asynchronous I/O pool of four threads per detected
+      // thread, which `SET threads` does not reach, held by every canvas
+      // engine. Canvas I/O is local spill and staging files, so one thread
+      // serves it (#870). v1.5 has no such option and refuses it.
+      ...(duck.version().startsWith('v1.') ? {} : { async_threads: '1' }),
     });
     const controlConnection = await instance.connect();
     await controlConnection.run(`SET memory_limit = '${this.options.memoryLimitMb}MB'`);
@@ -233,9 +260,12 @@ export class DuckdbProvider implements IDataCanvasProvider {
     // the ceiling; the cap only lowers it on a small memory_limit.
     const threadCap = Math.max(1, Math.floor(this.options.memoryLimitMb / MEMORY_MB_PER_THREAD));
     const detected = await controlConnection.runAndReadAll(
-      "SELECT current_setting('threads')::INTEGER AS n",
+      "SELECT current_setting('threads')::INTEGER AS n, current_database() AS database",
     );
-    const { n: detectedThreads } = detected.getRowObjectsJson()[0] as { n: number };
+    const { n: detectedThreads, database } = detected.getRowObjectsJson()[0] as {
+      database: string;
+      n: number;
+    };
     if (detectedThreads > threadCap) {
       await controlConnection.run(`SET threads = ${threadCap}`);
     }
@@ -261,6 +291,7 @@ export class DuckdbProvider implements IDataCanvasProvider {
     this.canvases.set(canvasId, {
       instance,
       controlConnection,
+      database,
       holds: new Set(),
       scratchDir,
       spillDir,
@@ -268,13 +299,16 @@ export class DuckdbProvider implements IDataCanvasProvider {
   }
 
   /**
-   * Close the canvas's instance and remove its spill directory. A call still
-   * running on the canvas keeps the database open on its own connection and
-   * can still read spilled blocks back from that directory, so the directory
-   * goes once the last such call settles, and this does not wait for it.
-   * DuckDB removes a `temp_directory` it created when the database finally
-   * closes; the removal here covers every other case, so nothing of the
-   * canvas outlives it.
+   * Remove the canvas, so a call made after this one rejects
+   * `canvas_not_found`, then close its control connection and instance and
+   * remove its spill directory once every call already running on it
+   * settles. Closing either under a call in flight crashes the process or
+   * fails the call (#893); each such call settles with its own result
+   * instead, reading back any blocks it spilled, and this does not wait for
+   * it. With none in flight, the canvas is closed and its directory gone
+   * before this resolves. DuckDB removes a `temp_directory` it created when
+   * the database closes; the removal here covers every other case, so
+   * nothing of the canvas outlives it.
    */
   async destroyCanvas(canvasId: string, _context: RequestContext): Promise<void> {
     const record = this.canvases.get(canvasId);
@@ -284,34 +318,34 @@ export class DuckdbProvider implements IDataCanvasProvider {
       operation: 'DuckdbProvider.destroyCanvas',
       additionalContext: { canvasId },
     });
-    try {
-      record.controlConnection.closeSync();
-    } catch (err) {
+    const warn = (message: string, err: unknown) =>
       logger.warning(
-        'DuckDB control connection close failed.',
+        message,
         withExtra(closeContext, { error: err instanceof Error ? err.message : String(err) }),
       );
-    }
-    try {
-      record.instance.closeSync();
-    } catch (err) {
-      logger.warning(
-        'DuckDB instance close failed.',
-        withExtra(closeContext, { error: err instanceof Error ? err.message : String(err) }),
+    const close = async () => {
+      try {
+        record.controlConnection.closeSync();
+      } catch (err) {
+        warn('DuckDB control connection close failed.', err);
+      }
+      try {
+        record.instance.closeSync();
+      } catch (err) {
+        warn('DuckDB instance close failed.', err);
+      }
+      await rm(record.spillDir, { recursive: true, force: true }).catch((err: unknown) =>
+        warn('Canvas spill directory removal failed.', err),
       );
-    }
-    const remove = () =>
-      rm(record.spillDir, { recursive: true, force: true }).catch((err: unknown) => {
-        logger.warning(
-          'Canvas spill directory removal failed.',
-          withExtra(closeContext, { error: err instanceof Error ? err.message : String(err) }),
-        );
-      });
+    };
     if (record.holds.size > 0) {
-      void Promise.all(record.holds).then(remove);
+      const closed: Promise<void> = Promise.all(record.holds)
+        .then(close)
+        .finally(() => this.closing.delete(closed));
+      this.closing.add(closed);
       return;
     }
-    await remove();
+    await close();
   }
 
   async healthCheck(): Promise<boolean> {
@@ -330,10 +364,11 @@ export class DuckdbProvider implements IDataCanvasProvider {
 
   /**
    * Destroy every canvas, then remove the private scratch directory. A call
-   * that reached a canvas before shutdown began can still be writing there —
-   * an open per-query connection outlives its closed instance — so the
-   * directory goes once the last such call settles, and shutdown does not
-   * wait for it. Until then the directory stays in place and private, which
+   * that reached a canvas before shutdown began keeps that canvas open (see
+   * {@link destroyCanvas}) and can still be writing there, so the directory
+   * goes once the last such call settles, and shutdown does not wait for it;
+   * each call honors its caller's `signal`, so none needs a bound of its own
+   * here. Until then the directory stays in place and private, which
    * keeps another local user from re-creating its name while that call still
    * writes inside it. A canvas whose creation straddles the shutdown is
    * refused rather than bound to the retired directory. A provider used
@@ -359,7 +394,10 @@ export class DuckdbProvider implements IDataCanvasProvider {
           withExtra(context, { error: err instanceof Error ? err.message : String(err) }),
         );
       });
-    const pending = held.filter((hold) => this.holds.has(hold));
+    // After each canvas's own deferred close and spill removal, never beside
+    // them: on Bun, a recursive `rm` that races the removal of an entry inside
+    // it can resolve with the directory still in place.
+    const pending = [...held.filter((hold) => this.holds.has(hold)), ...this.closing];
     if (pending.length > 0) {
       void Promise.all(pending).then(remove);
       return;
@@ -414,18 +452,28 @@ export class DuckdbProvider implements IDataCanvasProvider {
      * (#659): every other connection reads the previous table until the commit,
      * and a source, conversion, or cancellation failure rolls back to it — or,
      * on a first registration, to no table. A concurrent write to the same
-     * table fails this call with DuckDB's write-write conflict.
+     * table fails this call with DuckDB's write-write conflict, a
+     * `DatabaseError`.
      */
     const ddl = buildCreateTableSql(name, schema);
     const conn = await record.instance.connect();
+    // The engine's own steps fail classified; the caller's row source, which
+    // runs between them, fails as it threw.
+    const engine = async <T>(step: Promise<T>): Promise<T> => {
+      try {
+        return await step;
+      } catch (err) {
+        throw this.classify(err, record);
+      }
+    };
     let count = 0;
     try {
-      await conn.run('BEGIN TRANSACTION');
+      await engine(conn.run('BEGIN TRANSACTION'));
       try {
-        await conn.run(`DROP TABLE IF EXISTS ${quoteIdentifier(name)}`);
-        await conn.run(ddl);
+        await engine(conn.run(`DROP TABLE IF EXISTS ${ownTableName(record, name)}`));
+        await engine(conn.run(ddl));
         options?.signal?.throwIfAborted();
-        const appender = await conn.createAppender(name);
+        const appender = await engine(conn.createAppender(name));
         // The appender writes its rows to the table as a chunk fills and as it
         // closes; a failure there, out of memory included, is the engine's.
         const flush = (step: () => void) => {
@@ -473,7 +521,7 @@ export class DuckdbProvider implements IDataCanvasProvider {
         } finally {
           flush(() => appender.closeSync());
         }
-        await conn.run('COMMIT');
+        await engine(conn.run('COMMIT'));
       } catch (err) {
         // The source stopped early is closed so its `finally` runs (#661); the
         // loops above close theirs, the sniffer's continuation is closed here.
@@ -487,9 +535,9 @@ export class DuckdbProvider implements IDataCanvasProvider {
         throw err;
       }
     } catch (err) {
-      // A spill that cannot start fails here; the caller's own row source
-      // runs in the same block, so apart from the appender's failures,
-      // classified where they are raised, only errors naming a host path change.
+      // The caller's own row source runs in the same block, so apart from the
+      // engine's statements and the appender's failures, classified where they
+      // are raised, only errors naming a host path change.
       throw this.redactHostPaths(err, record);
     } finally {
       conn.closeSync();
@@ -547,7 +595,15 @@ export class DuckdbProvider implements IDataCanvasProvider {
           assertValidIdentifier(options.registerAs, 'table');
           await ensureTableMissing(record.controlConnection, options.registerAs);
           const ctas = `CREATE TABLE ${quoteIdentifier(options.registerAs)} AS ${sql}`;
-          await conn.run(ctas);
+          try {
+            await conn.run(ctas);
+          } catch (err) {
+            // The name was free when checked, but the engine refused it: another
+            // call staged it since, or it is staged in another letter case,
+            // which the check reads exactly and the engine does not (#891).
+            if (isCtasNameTaken(err)) throw registerAsClash(options.registerAs, err);
+            throw err;
+          }
           registeredAs = options.registerAs;
           const reader = await conn.runAndReadUntil(
             `SELECT * FROM ${quoteIdentifier(options.registerAs)} LIMIT ${preview}`,
@@ -589,7 +645,7 @@ export class DuckdbProvider implements IDataCanvasProvider {
     } catch (err) {
       if (registeredAs !== undefined) {
         await record.controlConnection
-          .run(`DROP TABLE IF EXISTS ${quoteIdentifier(registeredAs)}`)
+          .run(`DROP TABLE IF EXISTS ${ownTableName(record, registeredAs)}`)
           .catch(() => {});
       }
       throw err;
@@ -725,12 +781,7 @@ export class DuckdbProvider implements IDataCanvasProvider {
     // Block view-on-table-name collisions explicitly so the failure carries a
     // structured `reason` rather than a raw DuckDB catalog message.
     const existing = await this.lookupKind(record.controlConnection, name);
-    if (existing === 'table') {
-      throw validationError(
-        `Canvas already contains a base table named "${name}". Drop the table or choose a different name.`,
-        { reason: 'view_table_clash', name },
-      );
-    }
+    if (existing === 'table') throw viewTableClash(name);
 
     // The last point an abort is honored: the definition is catalog-only DDL
     // on the shared control connection, which is not interrupted on one call's
@@ -741,6 +792,9 @@ export class DuckdbProvider implements IDataCanvasProvider {
         `CREATE OR REPLACE VIEW ${quoteIdentifier(name)} AS ${selectSql}`,
       );
     } catch (err) {
+      // A table the check above did not see: staged since, or staged in another
+      // letter case, which the check reads exactly and the engine does not.
+      if (isViewOverTable(err)) throw viewTableClash(name, err);
       throw this.classify(err, record);
     }
 
@@ -775,21 +829,24 @@ export class DuckdbProvider implements IDataCanvasProvider {
     throwIfCancelled(options?.signal, IMPORT_CANCELLED);
 
     const sourceMissing = () =>
-      notFound(`Source canvas does not contain a table or view named "${sourceTableName}".`, {
-        reason: 'missing_table',
-        sourceCanvasId,
-        sourceTableName,
-        recovery: {
-          hint: "Re-check the source table name, or list the tables staged on the source canvas with this server's dataframe-describe tool.",
+      notFound(
+        `Source canvas does not contain a table or view named "${sourceTableName}".`,
+        {
+          reason: 'missing_table',
+          sourceCanvasId,
+          sourceTableName,
+          recovery: {
+            hint: "Re-check the source table name, or list the tables staged on the source canvas with this server's dataframe-describe tool.",
+          },
         },
-      });
+        { literals: [sourceTableName] },
+      );
     if ((await this.lookupKind(source.controlConnection, sourceTableName)) === undefined) {
       throw sourceMissing();
     }
 
-    const targetExisting = await this.lookupKind(target.controlConnection, asName);
-    if (targetExisting === 'view') {
-      throw validationError(
+    const viewClash = (cause?: unknown) =>
+      validationError(
         `Target canvas already contains a view named "${asName}". Drop the view or choose a different name.`,
         {
           reason: 'import_view_clash',
@@ -798,8 +855,9 @@ export class DuckdbProvider implements IDataCanvasProvider {
             hint: 'Drop the existing view first, or choose a different destination name for the imported table.',
           },
         },
+        cause === undefined ? { literals: [asName] } : { cause, literals: [asName] },
       );
-    }
+    if ((await this.lookupKind(target.controlConnection, asName)) === 'view') throw viewClash();
 
     // Round-trip through a scratch Parquet file. Parquet is
     // built into DuckDB's core (no extension load needed even with
@@ -831,7 +889,14 @@ export class DuckdbProvider implements IDataCanvasProvider {
       return await this.withConnection(target, options?.signal, IMPORT_CANCELLED, async (conn) => {
         await conn.run('BEGIN TRANSACTION');
         try {
-          await conn.run(`DROP TABLE IF EXISTS ${quoteIdentifier(asName)}`);
+          try {
+            await conn.run(`DROP TABLE IF EXISTS ${ownTableName(target, asName)}`);
+          } catch (err) {
+            // A view the check above did not see: staged since, or staged in
+            // another letter case, which the check reads exactly and the engine does not.
+            if (isDropOverView(err)) throw viewClash(err);
+            throw err;
+          }
           await conn.run(
             `CREATE TABLE ${quoteIdentifier(asName)} AS SELECT * FROM read_parquet('${escapeSqlString(tempPath)}')`,
           );
@@ -871,48 +936,41 @@ export class DuckdbProvider implements IDataCanvasProvider {
       assertValidIdentifier(options.tableName, 'table');
     }
     throwIfCancelled(options?.signal, DESCRIBE_CANCELLED);
-    // Every pushed filter stays qualified with the `t` alias. The join that
-    // made an unqualified `table_name` ambiguous is gone (#324), but keeping
-    // the qualification means re-introducing a second source here cannot
-    // silently resurrect the Binder Error of #235.
-    const filters = [`t.table_schema = 'main'`];
+    // Every pushed filter stays qualified with the `o` alias, so a second
+    // source joined here cannot silently resurrect the ambiguous-column
+    // Binder Error of #235.
+    const filters: string[] = [];
     if (options?.tableName) {
-      filters.push(`t.table_name = '${escapeSqlString(options.tableName)}'`);
+      filters.push(`o.name = '${escapeSqlString(options.tableName)}'`);
     }
     if (options?.kind === 'view') {
-      filters.push(`t.table_type = 'VIEW'`);
+      filters.push(`o.kind = 'view'`);
     } else if (options?.kind === 'table') {
-      filters.push(`t.table_type <> 'VIEW'`);
+      filters.push(`o.kind = 'table'`);
     }
+    const where = filters.length > 0 ? `WHERE ${filters.join(' AND ')}` : '';
 
     return await this.withConnection(record, options?.signal, DESCRIBE_CANCELLED, async (conn) => {
-      // No join against duckdb_tables(): its `estimated_size` is an estimated
-      // row count, not a byte footprint, so reporting it as `approxSizeBytes`
-      // sent a caller choosing an eviction victim after the wrong table. DuckDB
+      // No size column: `duckdb_tables().estimated_size` is an estimated row
+      // count, not a byte footprint, so reporting it as `approxSizeBytes` sent a
+      // caller choosing an eviction victim after the wrong table. DuckDB
       // exposes no per-table byte column at all (#324), so describe() reports none.
       const reader = await conn.runAndReadAll(
-        `SELECT t.table_name, t.table_type
-         FROM information_schema.tables t
-         WHERE ${filters.join(' AND ')}
-         ORDER BY t.table_name`,
+        `SELECT o.name, o.kind FROM ${STAGED_OBJECTS} o ${where} ORDER BY o.name`,
       );
-      const tableRows = reader.getRowObjectsJson() as {
-        table_name: string;
-        table_type: string;
-      }[];
+      const objects = reader.getRowObjectsJson() as { kind: CanvasObjectKind; name: string }[];
 
       // One object after another: the call's connection runs one statement at a time.
       const described: TableInfo[] = [];
       const unreadable: { error: Error; name: string }[] = [];
-      for (const row of tableRows) {
-        const kind = row.table_type === 'VIEW' ? 'view' : 'table';
+      for (const { kind, name } of objects) {
         try {
-          described.push(await this.describeOne(conn, row.table_name, kind));
+          described.push(await this.describeOne(conn, name, kind));
         } catch (err) {
           if (kind === 'table' || !(err instanceof Error) || !VIEW_READ_FAILURE.test(err.message)) {
             throw err;
           }
-          unreadable.push({ error: err, name: row.table_name });
+          unreadable.push({ error: err, name });
         }
       }
       if (unreadable.length > 0) throw viewUnreadableError(unreadable, this.hostPaths(record));
@@ -932,7 +990,7 @@ export class DuckdbProvider implements IDataCanvasProvider {
       name: c.column_name,
       type: dataTypeToColumnType(c.data_type),
       engineType: c.data_type,
-      nullable: c.is_nullable === 'YES',
+      nullable: c.is_nullable,
     }));
     return {
       name: tableName,
@@ -960,19 +1018,17 @@ export class DuckdbProvider implements IDataCanvasProvider {
   async clear(canvasId: string, _context: RequestContext): Promise<number> {
     using record = this.holdCanvas(canvasId);
     const reader = await record.controlConnection.runAndReadAll(
-      `SELECT table_name, table_type FROM information_schema.tables WHERE table_schema = 'main'`,
+      `SELECT name, kind FROM ${STAGED_OBJECTS} o`,
     );
-    const rows = reader.getRowObjectsJson() as { table_name: string; table_type: string }[];
+    const rows = reader.getRowObjectsJson() as { kind: CanvasObjectKind; name: string }[];
     // Drop views before tables so a dependent view doesn't block its base table.
     const ordered = [...rows].sort((a, b) => {
-      const aView = a.table_type === 'VIEW';
-      const bView = b.table_type === 'VIEW';
-      if (aView !== bView) return aView ? -1 : 1;
-      return a.table_name.localeCompare(b.table_name);
+      if (a.kind !== b.kind) return a.kind === 'view' ? -1 : 1;
+      return a.name.localeCompare(b.name);
     });
     for (const row of ordered) {
-      const dropKeyword = row.table_type === 'VIEW' ? 'VIEW' : 'TABLE';
-      await record.controlConnection.run(`DROP ${dropKeyword} ${quoteIdentifier(row.table_name)}`);
+      const dropKeyword = row.kind === 'view' ? 'VIEW' : 'TABLE';
+      await record.controlConnection.run(`DROP ${dropKeyword} ${quoteIdentifier(row.name)}`);
     }
     return rows.length;
   }
@@ -983,9 +1039,10 @@ export class DuckdbProvider implements IDataCanvasProvider {
 
   /**
    * `canvasId`'s record, held until the caller's `using` scope exits, on
-   * return or throw. {@link destroyCanvas} removes the canvas's spill
-   * directory only once every hold on that canvas is released, so a call
-   * already running can still read back the blocks it spilled. {@link shutdown}
+   * return or throw. {@link destroyCanvas} closes the canvas's control
+   * connection and instance, and removes its spill directory, only once every
+   * hold on that canvas is released, so a call already running keeps both
+   * open and can still read back the blocks it spilled. {@link shutdown}
    * removes the scratch directory only once every hold taken before it began
    * is released, so a call already running finishes inside the private
    * directory, never in one another local user re-created under its name.
@@ -1089,20 +1146,22 @@ export class DuckdbProvider implements IDataCanvasProvider {
     }
   }
 
-  /** `information_schema.columns` rows for `tableName`, in declaration order. */
+  /**
+   * The columns of the staged object `tableName`, in declaration order, read
+   * from `duckdb_columns()` for the reason {@link STAGED_OBJECTS} gives: the
+   * rows `information_schema.columns` holds for it.
+   */
   private async columnRows(
     connection: StatementReader,
     tableName: string,
-  ): Promise<{ column_name: string; data_type: string; is_nullable: string }[]> {
+  ): Promise<{ column_name: string; data_type: string; is_nullable: boolean }[]> {
     const reader = await connection.runAndReadAll(
-      `SELECT column_name, data_type, is_nullable FROM information_schema.columns ` +
-        `WHERE table_schema = 'main' AND table_name = '${escapeSqlString(tableName)}' ` +
-        `ORDER BY ordinal_position`,
+      `SELECT column_name, data_type, is_nullable FROM duckdb_columns() WHERE schema_name = 'main' AND NOT internal AND table_name = '${escapeSqlString(tableName)}' ORDER BY column_index`,
     );
     return reader.getRowObjectsJson() as {
       column_name: string;
       data_type: string;
-      is_nullable: string;
+      is_nullable: boolean;
     }[];
   }
 
@@ -1371,12 +1430,10 @@ export class DuckdbProvider implements IDataCanvasProvider {
     name: string,
   ): Promise<CanvasObjectKind | undefined> {
     const reader = await connection.runAndReadAll(
-      `SELECT table_type FROM information_schema.tables ` +
-        `WHERE table_schema = 'main' AND table_name = '${escapeSqlString(name)}' LIMIT 1`,
+      `SELECT o.kind FROM ${STAGED_OBJECTS} o WHERE o.name = '${escapeSqlString(name)}' LIMIT 1`,
     );
-    const rows = reader.getRowObjectsJson() as { table_type: string }[];
-    if (rows.length === 0) return;
-    return rows[0]?.table_type === 'VIEW' ? 'view' : 'table';
+    const rows = reader.getRowObjectsJson() as { kind: CanvasObjectKind }[];
+    return rows[0]?.kind;
   }
 
   /**
@@ -1449,7 +1506,7 @@ function buildCreateTableSql(tableName: string, schema: ColumnSchema[]): string 
 }
 
 /**
- * Map DuckDB `information_schema.columns.data_type` strings back to
+ * Map DuckDB `duckdb_columns().data_type` strings back to
  * {@link ColumnType}. A numeric type takes the tag that holds every one of its
  * values exactly; one no tag holds (`UBIGINT`, `HUGEINT`, `UHUGEINT`,
  * `DECIMAL`, `BIGNUM`) falls to `VARCHAR`, the form its query values take.
@@ -1471,48 +1528,6 @@ function dataTypeToColumnType(dataType: string): ColumnType {
   if (upper === 'JSON') return 'JSON';
   if (upper === 'BLOB' || upper === 'BYTEA') return 'BLOB';
   return 'VARCHAR';
-}
-
-/**
- * The engine classes a view's own definition fails with when it is read against
- * the canvas as now staged: a table or column it reads is gone, it reads itself,
- * a function rejects an argument it passes, or a value it converts does not
- * fit. Anything else a read raises — an I/O or memory fault, an interrupt — is
- * the engine's, not the view's.
- */
-const VIEW_READ_FAILURE = /^(?:Catalog|Binder|Conversion|Invalid Input|Out of Range) Error\b/;
-
-/** The recovery for a view that cannot be read: the two ways to make describe() answer again. */
-const VIEW_UNREADABLE_RECOVERY =
-  'Drop each view the message names, or define it again over the tables as now staged.';
-
-/**
- * The rejection for a describe() that could not read the views in `views`:
- * each named with the engine's own message, every `redact` path in it replaced
- * with `[path]`; the raw engine errors stay on `cause`.
- */
-function viewUnreadableError(
-  views: readonly { error: Error; name: string }[],
-  redact: readonly string[],
-): McpError {
-  const named = views.map(({ error, name }) => ({
-    name,
-    engineMessage: redactPaths(error.message.trim(), redact),
-  }));
-  return validationError(
-    `Canvas ${named.length === 1 ? 'view' : 'views'} could not be read: ${named.map((view) => `"${view.name}" — ${view.engineMessage}`).join('; ')}`,
-    {
-      reason: DUCKDB_ERROR_REASONS.viewUnreadable,
-      views: named,
-      recovery: { hint: VIEW_UNREADABLE_RECOVERY },
-    },
-    {
-      cause: new AggregateError(
-        views.map(({ error }) => error),
-        'Canvas views could not be read.',
-      ),
-    },
-  );
 }
 
 /**
@@ -1692,18 +1707,6 @@ function escapeSqlString(value: string): string {
 }
 
 /**
- * The qualified name a catalog table miss reports, as the parse tree joins it;
- * `undefined` for any other failure. DuckDB writes the name bare before `does
- * not exist!`, and quoted before `does not exist because` a schema or catalog
- * is missing.
- */
-function catalogMissName(message: string): string | undefined {
-  const match = /^Catalog Error: Table with name (.+) does not exist(!| because )/.exec(message);
-  if (match?.[1] === undefined) return;
-  return match[2] === '!' ? match[1] : match[1].replace(/^"(.*)"$/, '$1');
-}
-
-/**
  * Gate layers 0 and 1, the text scans. Optional layer 0 rejects system catalog
  * references on shared canvases where handle possession is the access
  * boundary. Layer 1 rejects deny-listed calls by name: read_json/read_parquet/…
@@ -1712,21 +1715,6 @@ function catalogMissName(message: string): string | undefined {
 function assertTextGated(sql: string, options: { denySystemCatalogs?: boolean } | undefined): void {
   if (options?.denySystemCatalogs) assertNoSystemCatalogs(sql);
   assertNoDeniedFunctions(sql);
-}
-
-/**
- * Replace every occurrence of each host directory in an engine message with
- * `[path]`, longest first so a directory nested inside another is redacted
- * whole. DuckDB quotes the absolute export and scratch paths it failed on;
- * the part below the directory — the caller's own export name — stays. A
- * one-character path (the filesystem root) is skipped, since replacing it
- * would mangle every path in the message.
- */
-function redactPaths(message: string, paths: readonly string[]): string {
-  return paths
-    .filter((path) => path.length > 1)
-    .sort((a, b) => b.length - a.length)
-    .reduce((text, path) => text.replaceAll(path, '[path]'), message);
 }
 
 const QUERY_CANCELLED = 'Canvas query was cancelled.';
@@ -1745,306 +1733,35 @@ function throwIfCancelled(signal: AbortSignal | undefined, message: string): voi
   if (signal?.aborted) throw cancelledError(message, signal.reason);
 }
 
+/**
+ * The canvas's staged tables and views, one row each with its `name` and
+ * `kind`: the rows `information_schema.tables` holds for schema `main`, every
+ * table and every view DuckDB did not create itself. Read from DuckDB's
+ * catalog table functions because `information_schema` reads the
+ * `duckdb_views` and `duckdb_columns` views by bare name, which an object
+ * staged under either name shadows (#862); no staged name shadows a table
+ * function call.
+ */
+const STAGED_OBJECTS = `(SELECT table_name AS name, 'table' AS kind FROM duckdb_tables() WHERE schema_name = 'main' UNION ALL SELECT view_name, 'view' FROM duckdb_views() WHERE schema_name = 'main' AND NOT internal)`;
+
+/**
+ * `name` as a table of the canvas's own database, for a drop that may find
+ * nothing there: a bare or `main.`-qualified name with no staged object
+ * behind it resolves to the DuckDB system view of that name, if there is one,
+ * and the drop fails on it (#862).
+ */
+function ownTableName(record: CanvasRecord, name: string): string {
+  return `${quoteIdentifier(record.database)}.main.${quoteIdentifier(name)}`;
+}
+
+/**
+ * Rejects a `registerAs` onto a name a staged table or view holds exactly. A
+ * name staged after this check, or in another letter case, fails the CTAS
+ * itself, which `query()` maps to the same rejection.
+ */
 async function ensureTableMissing(connection: DuckDBConnection, tableName: string): Promise<void> {
   const reader = await connection.runAndReadAll(
-    `SELECT 1 FROM information_schema.tables WHERE table_schema = 'main' AND table_name = '${escapeSqlString(tableName)}' LIMIT 1`,
+    `SELECT 1 FROM ${STAGED_OBJECTS} o WHERE o.name = '${escapeSqlString(tableName)}' LIMIT 1`,
   );
-  if (reader.getRowsJson().length > 0) {
-    throw validationError(
-      `Canvas table "${tableName}" already exists. Drop it before reusing the name.`,
-      { reason: 'register_as_clash', tableName },
-    );
-  }
-}
-
-/**
- * Reason codes {@link classifyDuckdbError} sets on `data.reason`, the one
- * `describe()` sets on a view it cannot read, and the one `export()` sets when
- * the engine runs out of memory. Exported
- * alongside {@link SQL_GATE_REASONS} so a canvas-consuming tool can map an
- * engine failure onto an `errors[]` entry without duplicating the strings.
- */
-export const DUCKDB_ERROR_REASONS = {
-  /** SQL the engine could not parse. */
-  sqlParseError: 'sql_parse_error',
-  /**
-   * A write the engine refused, or a statement naming a file — refused by the
-   * engine's configuration or by the gate — never the operating system
-   * refusing a file, which is an I/O fault.
-   */
-  sqlReadOnly: 'sql_read_only',
-  /**
-   * A gated SELECT, or a view an export or import reads, that prepared cleanly
-   * and then failed while it ran: on the staged data, or on an argument a
-   * function rejects as it runs.
-   */
-  sqlExecutionError: 'sql_execution_error',
-  /**
-   * `describe()` read a view whose own definition fails against the tables as
-   * now staged; `data.views` names each such view with the engine's message.
-   */
-  viewUnreadable: 'view_unreadable',
-  /**
-   * An export the engine ran out of memory writing, a `DatabaseError` whose
-   * `data.format` names the format and whose hint says what fits: the rows are
-   * too wide for the slice an export holds at once.
-   */
-  exportOutOfMemory: 'export_out_of_memory',
-} as const;
-
-/** Union of the engine-error reason strings — see {@link DUCKDB_ERROR_REASONS}. */
-export type DuckdbErrorReason = (typeof DUCKDB_ERROR_REASONS)[keyof typeof DUCKDB_ERROR_REASONS];
-
-/**
- * The recovery for SQL the engine could not parse, whether the statement is
- * refused as `sql_parse_error` or, SELECT-shaped, as `invalid_sql`. DuckDB v1.5
- * reads some keywords (`rows`, `name`) as an alias only after `AS`.
- */
-const SQL_PARSE_RECOVERY =
-  'Fix the SQL syntax the message names and send a single read-only SELECT. Put AS before an alias that is a SQL keyword, or double-quote it.';
-
-/** The recovery for a write or a file read: what this surface can do instead. */
-const SQL_READ_ONLY_RECOVERY =
-  "Send a read-only SELECT over the staged tables — list them with this server's dataframe-describe tool. This surface reads no files and cannot create, alter, or drop anything.";
-
-/**
- * DuckDB's execution-error classes, the split its own `Exception::
- * IsExecutionError` makes: CONVERSION, INVALID_INPUT, OUT_OF_RANGE. The SQL
- * prepared, so the fault is in the data the caller asked the engine to
- * process, not in the engine.
- *
- * BINDER joins them because a binder error that reaches the classifier was
- * raised while a prepared statement ran: the gate refuses a SELECT that fails
- * to prepare as `invalid_sql` before anything runs. Two sources remain, both
- * the caller's SQL: a table function rejecting its arguments as it runs (a
- * zero step or an infinite bound in `range` or `generate_series`), and a view
- * bound by an export or import after the table it reads was staged again
- * without the column it names.
- *
- * `@duckdb/node-api` surfaces a bare `Error` — no `errorType`, no `code` — and
- * `@duckdb/node-bindings` binds neither `duckdb_error_data_error_type` nor
- * `duckdb_result_error_type`, so the leading class prefix is the only
- * discriminator available in process. It is anchored at the start on purpose:
- * `Out of Range Error` and `Out of Memory Error` land on opposite sides of the
- * split and diverge only after `Out of `, and an engine fault whose message
- * merely quotes a data-error class mid-sentence is still an engine fault.
- */
-const DUCKDB_EXECUTION_ERROR_PREFIX = /^(Conversion|Invalid Input|Out of Range|Binder) Error\b/;
-
-/** A class {@link DUCKDB_EXECUTION_ERROR_PREFIX} captures. */
-type ExecutionErrorClass = 'Conversion' | 'Invalid Input' | 'Out of Range' | 'Binder';
-
-/** The `sql_execution_error` recovery per execution-error class, each the fix that class calls for. */
-const EXECUTION_ERROR_RECOVERY: Record<ExecutionErrorClass, string> = {
-  Conversion:
-    'Wrap the cast in TRY_CAST, or filter out the rows the message names before converting them.',
-  'Invalid Input':
-    'Filter out the rows whose values the function cannot read, or use the function’s TRY variant where it has one, such as TRY_CAST or TRY_STRPTIME.',
-  'Out of Range':
-    'Cast to a wider type such as HUGEINT or DOUBLE before the arithmetic that overflows, or filter out the rows whose values are out of range.',
-  Binder:
-    'Correct the argument the message names, such as a zero step or an infinite bound in range or generate_series. When it names a column, define the view that reads it again over the tables as now staged.',
-};
-
-/**
- * DuckDB's refusals, anchored on the class prefix the engine gives them:
- * `Permission Error` (file access with `enable_external_access` off), and a
- * write attempted in a read-only transaction (`TransactionContext Error: …
- * read-only mode`) or against a read-only database (`Invalid Input Error: …
- * attached in read-only mode!`). An `IO Error` never matches, whatever its
- * text: `Permission denied` and `Read-only file system` there are the
- * operating system refusing a file, an engine fault the caller cannot act on.
- */
-const DUCKDB_REFUSAL =
-  /^(?:Permission Error\b|(?:TransactionContext|Invalid Input) Error: .*\bread-only mode\b)/;
-
-/**
- * DuckDB's parser class, bare as `run()` reports it or behind the wrapper
- * `@duckdb/node-api` puts on a statement-extraction failure (`extractStatements()`,
- * and `start()` through it). Anchored like the other classes: a quoted file
- * name mentioning "syntax" is not one.
- */
-const DUCKDB_PARSER_ERROR_PREFIX = /^(?:Failed to extract statements: )?Parser Error\b/;
-
-/**
- * The classes, other than the parser's, that fail a SELECT while it is
- * prepared and each call for their own recovery. A `Binder Error` — an unknown
- * column, a grouping or signature mismatch — and anything else take the
- * `invalid_sql` reason's own hint.
- */
-const PREPARE_ERROR_CLASS = /^(Catalog|Invalid Input|IO) Error\b/;
-
-/** A class {@link PREPARE_ERROR_CLASS} captures. */
-type PrepareErrorClass = 'Catalog' | 'Invalid Input' | 'IO';
-
-/** The `invalid_sql` recovery per prepare-time class, each the fix that class calls for. */
-const PREPARE_ERROR_RECOVERY: Record<PrepareErrorClass, string> = {
-  Catalog:
-    "Correct the function, type, collation, or schema name the message reports missing — list the staged tables with this server's dataframe-describe tool.",
-  'Invalid Input':
-    'Correct the argument value the message names — a pattern, format string, or other constant the function cannot accept.',
-  IO: SQL_READ_ONLY_RECOVERY,
-};
-
-/**
- * A catalog miss naming a table bare, as DuckDB reports one an executing
- * statement could not find. Anchored, so an engine fault quoting it
- * mid-message stays a fault; a schema miss ends `does not exist because` and
- * never matches.
- */
-const DUCKDB_MISSING_TABLE = /^Catalog Error: Table with name (.+?) does not exist!/;
-
-/**
- * DuckDB's out-of-memory class, which can carry {@link DUCKDB_TUNING_ADVICE}:
- * by its name, or from the appender, which reports the engine's message
- * without its class, by the allocation it failed.
- */
-const DUCKDB_OUT_OF_MEMORY_PREFIX =
-  /^(?:Out of Memory Error\b|Failed to append: (?:could not|failed to) allocate\b)/;
-
-/**
- * Where the advice DuckDB appends to an out-of-memory message starts: `SET`
- * statements for threads, insertion order, and the memory limit, each one a
- * canvas refuses, so a caller can act on none of it.
- */
-const DUCKDB_TUNING_ADVICE = '\n\nPossible solutions:';
-
-/**
- * The `export_out_of_memory` recovery per format. Every export writes from one
- * engine thread, 2,048 rows at a time; a CSV export holds about three copies of
- * that slice as text and a JSON export about 13, which is why only JSON's hint
- * names a cheaper format.
- */
-const EXPORT_OUT_OF_MEMORY_RECOVERY: Record<ExportFormat, string> = {
-  json: 'A JSON export needs roughly 26 MB of canvas memory per KB of row width, since it holds about 13 copies of 2,048 rows as JSON text at once. Export as CSV or Parquet, which need far less, or export a selection that leaves out the widest columns.',
-  csv: 'The export holds 2,048 rows in memory at a time, and rows this wide do not fit in the canvas memory limit. Export a selection that leaves out the widest columns, or ask the operator to raise CANVAS_DEFAULT_MEMORY_LIMIT_MB.',
-  parquet:
-    'The export holds 2,048 rows in memory at a time, and rows this wide do not fit in the canvas memory limit. Export a selection that leaves out the widest columns, or ask the operator to raise CANVAS_DEFAULT_MEMORY_LIMIT_MB.',
-};
-
-/**
- * `err`, an export's failure as {@link classifyDuckdbError} left it, as
- * `export_out_of_memory` when the engine ran out of memory: the first line of
- * the engine's message, `format`, and that format's hint, with the raw engine
- * error on `cause`. Any other failure as it came.
- */
-function exportOutOfMemory(err: unknown, format: ExportFormat): unknown {
-  if (!(err instanceof McpError) || !DUCKDB_OUT_OF_MEMORY_PREFIX.test(err.message)) return err;
-  const lineEnd = err.message.indexOf('\n');
-  return databaseError(
-    lineEnd === -1 ? err.message : err.message.slice(0, lineEnd),
-    {
-      reason: DUCKDB_ERROR_REASONS.exportOutOfMemory,
-      format,
-      recovery: { hint: EXPORT_OUT_OF_MEMORY_RECOVERY[format] },
-    },
-    { cause: err.cause },
-  );
-}
-
-/**
- * The `missing_table` `NotFound` for a canvas table that does not exist, as
- * `query()` gives a statement naming one and an export or import gives a view
- * whose table was dropped.
- */
-function missingTableError(tableName: string, cause: unknown): McpError {
-  return notFound(
-    `Canvas table "${tableName}" does not exist. The table may have expired, been dropped, or the name may be mistyped.`,
-    {
-      reason: 'missing_table',
-      tableName,
-      recovery: {
-        hint: "Re-run the tool that produced this table to stage it again, or list the currently staged tables with this server's dataframe-describe tool.",
-      },
-    },
-    { cause },
-  );
-}
-
-/**
- * The recovery for a SELECT-shaped statement that failed to parse or prepare,
- * by the engine's class prefix on `message`: syntax for a parser error, the
- * class's own fix for a catalog miss, a rejected argument, or a file, and the
- * `invalid_sql` hint for everything else.
- * @internal Exported for unit testing.
- */
-export function prepareFailureRecovery(message: string): string {
-  if (DUCKDB_PARSER_ERROR_PREFIX.test(message)) return SQL_PARSE_RECOVERY;
-  const prepareClass = PREPARE_ERROR_CLASS.exec(message)?.[1] as PrepareErrorClass | undefined;
-  return prepareClass === undefined
-    ? gateRecovery(SQL_GATE_REASONS.invalidSql).recovery.hint
-    : PREPARE_ERROR_RECOVERY[prepareClass];
-}
-
-/**
- * Map a DuckDB-thrown error to a framework error class. Classification is for
- * raw engine errors only — an already-structured `McpError` passes through
- * unchanged (#254): structured throws from inside the provider's try blocks
- * (`ensureTableMissing`'s `register_as_clash`, `resolveExportPath`'s path
- * validations) must keep their code and `data.reason` instead of being
- * reclassified as `DatabaseError`.
- *
- * The three caller-side classes are `ValidationError`, each matched on the
- * engine's own class prefix. A table missing while a statement runs — a view
- * an export or import reads, after its table was dropped — is the
- * `missing_table` `NotFound` that `query()` gives one missing at prepare time,
- * so the engine's spelling suggestion never reaches the caller. Everything
- * else — I/O, internal, out-of-memory, transaction conflict, interrupt — stays
- * `DatabaseError`, which is what an export or Parquet round-trip failing on the
- * filesystem must remain (#565); an out-of-memory message is cut before
- * DuckDB's tuning advice. Every `redact` path in the message becomes `[path]`;
- * the raw engine error, paths and advice included, stays on `cause`.
- * @internal Exported for unit testing.
- */
-export function classifyDuckdbError(err: unknown, redact: readonly string[] = []): Error {
-  if (err instanceof McpError) return err;
-  if (err instanceof Error) {
-    const msg = redactPaths(err.message, redact);
-    // Checked before the execution prefix: a write refused by a read-only
-    // database is phrased as an `Invalid Input Error`.
-    if (DUCKDB_REFUSAL.test(msg)) {
-      return engineFailure(
-        DUCKDB_ERROR_REASONS.sqlReadOnly,
-        `Canvas SQL rejected: ${msg}`,
-        SQL_READ_ONLY_RECOVERY,
-        err,
-      );
-    }
-    const executionClass = DUCKDB_EXECUTION_ERROR_PREFIX.exec(msg)?.[1] as
-      | ExecutionErrorClass
-      | undefined;
-    if (executionClass !== undefined) {
-      return engineFailure(
-        DUCKDB_ERROR_REASONS.sqlExecutionError,
-        `Canvas query failed: ${msg}`,
-        EXECUTION_ERROR_RECOVERY[executionClass],
-        err,
-      );
-    }
-    if (DUCKDB_PARSER_ERROR_PREFIX.test(msg)) {
-      return engineFailure(
-        DUCKDB_ERROR_REASONS.sqlParseError,
-        `Canvas SQL rejected: ${msg}`,
-        SQL_PARSE_RECOVERY,
-        err,
-      );
-    }
-    const missingTable = DUCKDB_MISSING_TABLE.exec(msg)?.[1];
-    if (missingTable !== undefined) return missingTableError(missingTable, err);
-    const advice = DUCKDB_OUT_OF_MEMORY_PREFIX.test(msg) ? msg.indexOf(DUCKDB_TUNING_ADVICE) : -1;
-    return databaseError(advice === -1 ? msg : msg.slice(0, advice), undefined, { cause: err });
-  }
-  return databaseError('DuckDB threw a non-Error value.', {
-    value: redactPaths(String(err), redact),
-  });
-}
-
-/** A caller-side engine failure: reason, recovery, and the engine error chained. */
-function engineFailure(
-  reason: DuckdbErrorReason,
-  message: string,
-  hint: string,
-  cause: Error,
-): McpError {
-  return validationError(message, { reason, recovery: { hint } }, { cause });
+  if (reader.getRowsJson().length > 0) throw registerAsClash(tableName);
 }
