@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-11-08 08:57:18
+Generated on: 2026-11-26 10:43:57
 
 ```text
 mcp-ts-core/
@@ -428,6 +428,7 @@ mcp-ts-core/
 │   │   │   │   └── sqlGate.ts
 │   │   │   ├── providers/
 │   │   │   │   └── duckdb/
+│   │   │   │       ├── duckdbErrors.ts
 │   │   │   │       ├── DuckdbProvider.ts
 │   │   │   │       └── exportWriter.ts
 │   │   │   ├── index.ts
@@ -643,7 +644,8 @@ mcp-ts-core/
 │   │   │   ├── environment.ts
 │   │   │   ├── options.ts
 │   │   │   ├── provenance.ts
-│   │   │   └── runner.ts
+│   │   │   ├── setup.ts
+│   │   │   └── workload.ts
 │   │   ├── io/
 │   │   │   ├── harness/
 │   │   │   │   ├── mcp-request.ts
@@ -703,6 +705,7 @@ mcp-ts-core/
 │   │   ├── soak-http-server.js
 │   │   ├── stdio-inflight-server.js
 │   │   ├── stdio-log-server.js
+│   │   ├── stdio-wire-server.js
 │   │   ├── teardown-server.js
 │   │   └── worker-runtime.fixture.ts
 │   ├── fuzz/

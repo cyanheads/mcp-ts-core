@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.13.23](changelog/0.13.x/0.13.23.md) — 2026-11-26 · 🛡️ Security
+
+fetchWithTimeout follows redirects the same way on Node, Bun, and workerd, stdio keeps console output off the JSON-RPC stream, and defects in the SQLite mirror, DuckDB canvas, pacer, and Markdown escaping are fixed. Tests and scaffolds move to Vitest 5.
+
 ## [0.13.22](changelog/0.13.x/0.13.22.md) — 2026-11-08 · ⚠️ Breaking · 🛡️ Security
 
 Filesystem storage keeps every valid key as written and gives every tenant its own directory, captured upstream error bodies stay off client envelopes by default, tool output fields with transforming schemas stop failing successful calls, and engines.bun rises to >=1.4.4.
