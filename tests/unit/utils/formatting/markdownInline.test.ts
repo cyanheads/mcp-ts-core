@@ -4,11 +4,14 @@
  * live node.
  * @module tests/utils/formatting/markdownInline.test
  */
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 
 import {
   escapeMarkdownInline,
+  escapeMarkdownInlineWithLiterals,
   markdownImage,
   markdownLink,
 } from '@/utils/formatting/markdownInline.js';
@@ -92,8 +95,8 @@ const markdownishText = fc
 
 /**
  * {@link markdownishText} with the runs an ATX heading or a table cell reads
- * as syntax spliced in: a `#` run after a space or tab, and Unicode whitespace
- * that markdown-it's cell `trim()` strips.
+ * as syntax spliced in: a `#` run after a space or tab or too long to open a
+ * heading, and Unicode whitespace that markdown-it's cell `trim()` strips.
  */
 const slotText = fc
   .array(
@@ -101,7 +104,7 @@ const slotText = fc
       { weight: 3, arbitrary: markdownishText },
       {
         weight: 1,
-        arbitrary: fc.constantFrom(' #', ' ##', '\t#', '#', '# ', '﻿', ' ', ' '),
+        arbitrary: fc.constantFrom(' #', ' ##', '\t#', '#', '# ', '#######', '﻿', ' ', ' '),
       },
     ),
     { maxLength: 4 },
@@ -120,6 +123,11 @@ const slotLine = slotText.map((text) => text.replace(/[\r\n]/g, ''));
 const SLOTS = {
   paragraph: { wrap: (e: string) => e, block: 'paragraph_open', runs: (v: string) => [v] },
   heading: { wrap: (e: string) => `## ${e}`, block: 'heading_open', runs: (v: string) => [v] },
+  'heading after a label': {
+    wrap: (e: string) => `## Label ${e}`,
+    block: 'heading_open',
+    runs: (v: string) => [`Label ${v}`],
+  },
   'list item': {
     wrap: (e: string) => `- ${e}`,
     block: 'bullet_list_open',
@@ -160,7 +168,15 @@ function expectSlotReadBack(slot: Slot, text: string, preset: CommonMarkPreset):
 /** Slots holding a value of one line, and the presets each is read under; a table is GFM only. */
 const SINGLE_LINE_SLOTS: ReadonlyArray<readonly [Slot, CommonMarkPreset]> = [
   ...(
-    ['paragraph', 'heading', 'list item', 'ordered item', 'block quote', 'after a label'] as const
+    [
+      'paragraph',
+      'heading',
+      'heading after a label',
+      'list item',
+      'ordered item',
+      'block quote',
+      'after a label',
+    ] as const
   ).flatMap((slot) => PRESETS.map((preset) => [slot, preset] as const)),
   ['table cell', 'gfm'],
 ];
@@ -275,6 +291,32 @@ describe('escapeMarkdownInline', () => {
     },
   );
 
+  it('escapes the first # of a line made only of #, which a heading reads as its closing sequence', () => {
+    expect(escapeMarkdownInline('######')).toBe('\\######');
+    expect(escapeMarkdownInline('#######')).toBe('\\#######');
+    expect(escapeMarkdownInline('#######\t')).toBe('\\#######&#9;');
+    expect(escapeMarkdownInline('a\n########')).toBe('a\\\n\\########');
+    // Text after the run, or edge whitespace before it, already keeps it out of a closing sequence.
+    for (const [text, expected] of [
+      ['####### foo', '####### foo'],
+      ['####### #', '####### \\#'],
+      [' #######', '&#32;#######'],
+      ['a #######', 'a ######\\#'],
+    ] as const) {
+      expect(escapeMarkdownInline(text), JSON.stringify(text)).toBe(expected);
+    }
+  });
+
+  it.each(PRESETS)(
+    'reads a value made only of # back in a heading, bare and after a label, under %s',
+    (preset) => {
+      for (const length of [1, 6, 7, 8, 12, 40]) {
+        expectSlotReadBack('heading', '#'.repeat(length), preset);
+        expectSlotReadBack('heading after a label', '#'.repeat(length), preset);
+      }
+    },
+  );
+
   it('encodes edge Unicode whitespace as numeric references', () => {
     expect(escapeMarkdownInline(' a　')).toBe('&#160;a&#12288;');
     expect(escapeMarkdownInline('　')).toBe('&#12288;');
@@ -321,6 +363,12 @@ describe('escapeMarkdownInline', () => {
     }
   });
 
+  /**
+   * The timing tests run with no timeout: vitest compares a synchronous body's
+   * wall time only after it returns, so a timeout would guard no hang and fail
+   * linear work on a loaded machine. Each size's thread-CPU bound stops a cost
+   * beyond linear.
+   */
   it('encodes in time linear in the length of its input', () => {
     /**
      * One input of about `length` characters per shape the encoder treats
@@ -355,7 +403,29 @@ describe('escapeMarkdownInline', () => {
         for (const input of batch) escapeMarkdownInline(input);
       };
     });
-  });
+  }, 0);
+
+  it('encodes literals in time linear in the length of its input', () => {
+    /**
+     * Lines that spans split into many runs: the only unit to decide past
+     * every span, a decided unit inside every span, and a `<` tested against
+     * the spans rendered after it.
+     */
+    expectLinearCost((length) => {
+      const farCandidate = `${'x '.repeat(length / 2)}*`;
+      expect(escapeMarkdownInlineWithLiterals(farCandidate, ['x'])).toBe(
+        `${'`x` '.repeat(length / 2)}\\*`,
+      );
+      const inputs: Array<[string, string[]]> = [
+        [farCandidate, ['x']],
+        ['* '.repeat(length / 2), ['*']],
+        ['<x '.repeat(length / 3), ['x']],
+      ];
+      return () => {
+        for (const [input, literals] of inputs) escapeMarkdownInlineWithLiterals(input, literals);
+      };
+    });
+  }, 0);
 
   it('reads a table cell edged with a space and an ideographic space back under gfm', () => {
     expectSlotReadBack('table cell', ' a　', 'gfm');
@@ -395,6 +465,72 @@ describe('escapeMarkdownInline', () => {
       { numRuns: 2000 },
     );
   });
+});
+
+describe('encoder working memory', () => {
+  const execFileAsync = promisify(execFile);
+  const SRC = new URL('../../../../src/', import.meta.url).href;
+  const LENGTH = 14_000_000;
+
+  /**
+   * The rise in a fresh process's peak resident set across one encoder call on
+   * `unit` repeated to {@link LENGTH} characters, the output read through so a
+   * rope is flattened, per input character; and the output's length. The
+   * child runs on the runtime running the tests: Bun imports `src/` as it is,
+   * and under Node a resolve hook maps `@/` onto `src/`, whose types Node
+   * strips.
+   */
+  async function peakRisePerCharacter(
+    encoder: 'escapeMarkdownInline' | 'escapeMarkdownInlineWithLiterals',
+    unit: string,
+  ): Promise<{ bytesPerCharacter: number; outputLength: number }> {
+    const call =
+      encoder === 'escapeMarkdownInline'
+        ? 'encoders.escapeMarkdownInline(input)'
+        : "encoders.escapeMarkdownInlineWithLiterals(input, ['zzz-no-match'])";
+    const script = `
+      const src = ${JSON.stringify(SRC)};
+      if (!process.versions.bun) {
+        const { registerHooks } = await import('node:module');
+        registerHooks({
+          resolve: (specifier, context, next) =>
+            next(specifier.startsWith('@/') ? new URL(specifier.slice(2).replace(/\\.js$/, '.ts'), src).href : specifier, context),
+        });
+      }
+      const encoders = await import(new URL('utils/formatting/markdownInline.ts', src).href);
+      const unit = ${JSON.stringify(unit)};
+      const input = unit.repeat(Math.ceil(${LENGTH} / unit.length)).slice(0, ${LENGTH});
+      const before = process.resourceUsage().maxRSS;
+      const output = ${call};
+      for (let i = 0; i < output.length; i += 4096) output.charCodeAt(i);
+      const after = process.resourceUsage().maxRSS;
+      console.log(JSON.stringify({ bytesPerCharacter: ((after - before) * 1024) / ${LENGTH}, outputLength: output.length }));
+    `;
+    const args = process.versions.bun ? ['-e', script] : ['--input-type=module', '-e', script];
+    const { stdout } = await execFileAsync(process.execPath, args, { timeout: 50_000 });
+    return JSON.parse(stdout);
+  }
+
+  const JSON_UNIT = '{"lat":47.1234567,"lon":-122.1234567},';
+
+  it.each([
+    ['escapeMarkdownInline', 'one line, nothing escaped', JSON_UNIT, LENGTH],
+    ['escapeMarkdownInline', 'one line, every character escaped', '*', 2 * LENGTH],
+    // Each `*` line becomes `\*`, each break a hard break, and the final break `&#10;`.
+    ['escapeMarkdownInline', 'one-character lines, each escaped', '*\n', 2 * LENGTH + 3],
+    ['escapeMarkdownInline', 'one line of whitespace, each a reference', ' ', 5 * LENGTH],
+    ['escapeMarkdownInlineWithLiterals', 'one line, nothing escaped', JSON_UNIT, LENGTH],
+    ['escapeMarkdownInlineWithLiterals', 'one line, every character escaped', '*', 2 * LENGTH],
+  ] as const)(
+    '%s holds under 16 bytes per input character on 14M characters: %s',
+    async (encoder, _shape, unit, expectedLength) => {
+      const { bytesPerCharacter, outputLength } = await peakRisePerCharacter(encoder, unit);
+
+      expect(outputLength).toBe(expectedLength);
+      expect(bytesPerCharacter).toBeLessThan(16);
+    },
+    60_000,
+  );
 });
 
 describe('markdownLink / markdownImage', () => {

@@ -10,10 +10,19 @@
 
 import { codeSpan } from '@/utils/formatting/codeSpan.js';
 
+/** What follows the `&` of a reference CommonMark decodes: decimal, hexadecimal, or named. */
+const REFERENCE_BODY = '#[xX][0-9a-fA-F]{1,6};|#[0-9]{1,7};|[A-Za-z][A-Za-z0-9]{1,31};';
 /** An `&` that starts a run CommonMark decodes as an entity or numeric reference. */
-const ENTITY_AMPERSAND = /&(?=#[xX][0-9a-fA-F]{1,6};|#[0-9]{1,7};|[A-Za-z][A-Za-z0-9]{1,31};)/g;
+const ENTITY_AMPERSAND = new RegExp(`&(?=${REFERENCE_BODY})`, 'g');
+/** A whole entity or numeric reference at `lastIndex`, so where it ends can be checked. */
+const REFERENCE_AT = new RegExp(`&(?:${REFERENCE_BODY})`, 'y');
+/**
+ * A code unit {@link escapeText} decides on: `` ` `` `*` `[` `]` `|` `~`,
+ * always escaped, and `\` `_` `<` `&`, escaped by what surrounds them. Every
+ * other code unit passes through as written.
+ */
+const DECIDED = /[`*[\]|~\\_<&]/g;
 const ASCII_PUNCTUATION = /[!-/:-@[-`{-~]/;
-const ALWAYS_ESCAPED = new Set(['`', '*', '[', ']', '|', '~']);
 const WORD_CHARACTER = /[\p{L}\p{N}]/u;
 /** Edge whitespace, which becomes a reference: every `\s` character but U+000B. */
 const EDGE_SPACE = /^[^\S\v]$/u;
@@ -30,20 +39,56 @@ const MARKUP_OPENER = /<(?:[A-Za-z/!?]|[^\s<>@]*@[^\s<>]*>)/y;
  */
 const TOUCHING = /^[\p{L}\p{N}_]$/u;
 
-/** Whether the code point starting at `index` of `text` is a letter, digit, or `_`. */
-function touchesAt(text: string, index: number): boolean {
-  const point = text.codePointAt(index);
-  return point !== undefined && TOUCHING.test(String.fromCodePoint(point));
+/** The code point starting at `index` of `text`, which is inside it, as a string; a lone surrogate is one. */
+function pointAt(text: string, index: number): string {
+  return String.fromCodePoint(text.codePointAt(index) as number);
 }
 
-/** Whether the code point ending just before `index` of `text` is a letter, digit, or `_`. */
-function touchesBefore(text: string, index: number): boolean {
-  if (index === 0) return false;
+/** The code point ending just before `index` of `text`, which is past its start, as a string; a lone surrogate is one. */
+function pointBefore(text: string, index: number): string {
   const pair =
     index >= 2 &&
     (text.charCodeAt(index - 1) & 0xfc00) === 0xdc00 &&
     (text.charCodeAt(index - 2) & 0xfc00) === 0xd800;
-  return TOUCHING.test(text.slice(index - (pair ? 2 : 1), index));
+  return text.slice(index - (pair ? 2 : 1), index);
+}
+
+/** Whether the code point starting at `index` of `text` is a letter, digit, or `_`. */
+function touchesAt(text: string, index: number): boolean {
+  return index < text.length && TOUCHING.test(pointAt(text, index));
+}
+
+/** Whether the code point ending just before `index` of `text` is a letter, digit, or `_`. */
+function touchesBefore(text: string, index: number): boolean {
+  return index > 0 && TOUCHING.test(pointBefore(text, index));
+}
+
+/** Pieces an {@link Output} holds before it joins them into one flat chunk. */
+const CHUNK_PIECES = 4096;
+
+/**
+ * A string built from many short pieces in memory proportional to its length:
+ * the pieces are joined into flat chunks as they arrive, so the result never
+ * holds an array slot or a rope node per piece.
+ */
+class Output {
+  readonly #chunks: string[] = [];
+  readonly #pieces: string[] = [];
+
+  add(piece: string): void {
+    if (this.#pieces.push(piece) === CHUNK_PIECES) this.#flush();
+  }
+
+  /** Everything added, as one string. */
+  join(): string {
+    this.#flush();
+    return this.#chunks.join('');
+  }
+
+  #flush(): void {
+    this.#chunks.push(this.#pieces.join(''));
+    this.#pieces.length = 0;
+  }
 }
 
 /**
@@ -184,65 +229,112 @@ function literalSpans(text: string, root: LiteralNode): Span[] {
   return spans;
 }
 
+/** The index of the first code unit at or after `index` that {@link escapeText} decides on; the length when none. */
+function decidedFrom(text: string, index: number): number {
+  DECIDED.lastIndex = index;
+  return DECIDED.test(text) ? DECIDED.lastIndex - 1 : text.length;
+}
+
 /**
- * Escapes `text`, a line without its edge whitespace, one code point at a
- * time, and renders each of `spans` as a {@link codeSpan}. A span reads as a
- * backtick to the code points beside it, which is what its delimiter is: a `\`
- * before one stays escaped, and an `_` beside one is never intraword. An
- * entity is matched within the text between spans only.
+ * Whether the {@link DECIDED} code unit at `index` of `text`, in the run
+ * `[from, to)` between spans, takes a `\` to read as itself. `rendered` is the
+ * line with its spans rendered, in which the unit sits at `renderedIndex`. A
+ * span reads as a backtick to the code points beside it, which is what its
+ * delimiter is.
+ */
+function escapes(
+  text: string,
+  index: number,
+  from: number,
+  to: number,
+  rendered: string,
+  renderedIndex: number,
+): boolean {
+  switch (text[index]) {
+    case '\\': {
+      /**
+       * A backslash is literal before anything else; before trailing
+       * whitespace it would escape the `&` of the reference that whitespace
+       * becomes. The run ends at the end of the line or at a span.
+       */
+      if (index + 1 === to) return true;
+      // One code unit: no code point outside the BMP is punctuation or whitespace.
+      const next = text[index + 1] as string;
+      return ASCII_PUNCTUATION.test(next) || /\s/.test(next);
+    }
+    case '_':
+      // Intraword, between two letters or digits, it opens no emphasis.
+      return !(
+        index > from &&
+        index + 1 < to &&
+        WORD_CHARACTER.test(pointBefore(text, index)) &&
+        WORD_CHARACTER.test(pointAt(text, index + 1))
+      );
+    case '<':
+      // Tested against the line as rendered: a span after it is backticks.
+      MARKUP_OPENER.lastIndex = renderedIndex;
+      return MARKUP_OPENER.test(rendered);
+    case '&':
+      // An entity is matched within the run only.
+      REFERENCE_AT.lastIndex = index;
+      return REFERENCE_AT.test(text) && REFERENCE_AT.lastIndex <= to;
+    default:
+      return true;
+  }
+}
+
+/** `text` with each of `spans` rendered as a {@link codeSpan}. */
+function withSpans(text: string, spans: readonly Span[]): string {
+  const out = new Output();
+  let from = 0;
+  for (const [start, end] of spans) {
+    out.add(text.slice(from, start));
+    out.add(codeSpan(text.slice(start, end)));
+    from = end;
+  }
+  out.add(text.slice(from));
+  return out.join();
+}
+
+/**
+ * Escapes `text`, a line without its edge whitespace, and renders each of
+ * `spans` as a {@link codeSpan}: a `\` before one stays escaped, and an `_`
+ * beside one is never intraword.
+ *
+ * The result is built from slices of `text` between the code units it
+ * escapes, so its working memory stays proportional to the output, and a line
+ * with nothing to escape and no span comes back as itself.
  */
 function escapeText(text: string, spans: readonly Span[]): string {
-  const units: string[] = [];
-  const code: boolean[] = [];
+  const rendered = spans.length === 0 ? text : withSpans(text, spans);
+  let out: Output | undefined;
+  let written = 0; // `text` before this is in `out`
+  let shift = 0; // how much longer the spans so far render than they are
   let from = 0;
+  // The next decided unit, kept across spans: a scan never starts before one it found.
+  let next = -1;
   for (const [start, end] of [...spans, [text.length, text.length] as const]) {
-    // Code points, so a neighbour outside the BMP is tested as one character.
-    for (const ch of text.slice(from, start)) {
-      units.push(ch);
-      code.push(false);
+    if (next < from) next = decidedFrom(text, from);
+    for (; next < start; next = decidedFrom(text, next + 1)) {
+      if (!escapes(text, next, from, start, rendered, next + shift)) continue;
+      out ??= new Output();
+      out.add(text.slice(written, next));
+      out.add('\\');
+      written = next;
     }
     if (start < end) {
-      units.push(codeSpan(text.slice(start, end)));
-      code.push(true);
+      const span = codeSpan(text.slice(start, end));
+      out ??= new Output();
+      out.add(text.slice(written, start));
+      out.add(span);
+      written = end;
+      shift += span.length - (end - start);
     }
     from = end;
   }
-  const rendered = spans.length === 0 ? text : units.join('');
-  const neighbour = (i: number) => (code[i] ? '`' : units[i]);
-  let out = '';
-  let prose = '';
-  let offset = 0;
-  for (let i = 0; i < units.length; offset += (units[i] as string).length, i++) {
-    const ch = units[i] as string;
-    if (code[i]) {
-      out += prose.replace(ENTITY_AMPERSAND, '\\&') + ch;
-      prose = '';
-      continue;
-    }
-    const prev = neighbour(i - 1);
-    const next = neighbour(i + 1);
-    let escaped: boolean;
-    if (ch === '\\') {
-      // A backslash is literal before anything else; before trailing whitespace
-      // it would escape the `&` of the reference that whitespace becomes.
-      escaped = next === undefined || ASCII_PUNCTUATION.test(next) || /\s/.test(next);
-    } else if (ch === '_') {
-      escaped = !(
-        prev !== undefined &&
-        next !== undefined &&
-        WORD_CHARACTER.test(prev) &&
-        WORD_CHARACTER.test(next)
-      );
-    } else if (ch === '<') {
-      // Tested against the line as rendered: a span after it is backticks.
-      MARKUP_OPENER.lastIndex = offset;
-      escaped = MARKUP_OPENER.test(rendered);
-    } else {
-      escaped = ALWAYS_ESCAPED.has(ch);
-    }
-    prose += escaped ? `\\${ch}` : ch;
-  }
-  return out + prose.replace(ENTITY_AMPERSAND, '\\&');
+  if (out === undefined) return text;
+  out.add(text.slice(written));
+  return out.join();
 }
 
 /**
@@ -278,14 +370,17 @@ function escapeLine(line: string, literals: LiteralNode | undefined): string {
 }
 
 /**
- * Escapes a block marker opening a line: `#`, `>`, a list marker, a thematic
- * break, a setext underline, or a GFM table delimiter row (`:-`, `-:`), which
- * turns the line above into a header even when its only pipe is escaped.
+ * Escapes a block marker opening a line: an ATX heading opener (one to six `#`
+ * before a space, a tab, or the end), a line of `#` alone, which a heading
+ * reads as its closing sequence, `>`, a list marker, a thematic break, a
+ * setext underline, or a GFM table delimiter row (`:-`, `-:`), which turns the
+ * line above into a header even when its only pipe is escaped.
  */
 function escapeLineStart(core: string): string {
   if (
     /^(?:#{1,6}|[-+])(?:[ \t]|$)/.test(core) ||
     /^-[- \t]*$/.test(core) ||
+    /^#+$/.test(core) ||
     /^=+$/.test(core) ||
     /^:?-+:?$/.test(core) ||
     core.startsWith('>')
@@ -296,9 +391,23 @@ function escapeLineStart(core: string): string {
   return core.replace(/^(\d{1,9})([.)])(?=[ \t]|$)/, '$1\\$2');
 }
 
-/** Each whitespace character as its decimal numeric reference (`&#32;`, `&#9;`, `&#160;`). */
+/**
+ * Each character of `whitespace`, a run of edge whitespace, as its decimal
+ * numeric reference (`&#32;`, `&#9;`, `&#160;`). A run of one character is one
+ * repeated reference, so working memory stays proportional to the output.
+ * Every whitespace character is one UTF-16 code unit.
+ */
 function toReferences(whitespace: string): string {
-  return whitespace.replace(/\s/gu, (ch) => `&#${ch.codePointAt(0)};`);
+  if (whitespace === '') return '';
+  const out = new Output();
+  for (let start = 0; start < whitespace.length; ) {
+    const unit = whitespace.charCodeAt(start);
+    let end = start + 1;
+    while (whitespace.charCodeAt(end) === unit) end++;
+    out.add(`&#${unit};`.repeat(end - start));
+    start = end;
+  }
+  return out.join();
 }
 
 /**
@@ -316,7 +425,9 @@ function toReferences(whitespace: string): string {
  *   sits on both sides of it.
  * - `<` before a letter, `/`, `!`, `?`, or an email autolink; `&` before an
  *   entity-shaped run (`&copy;`, `&#123;`).
- * - At the start of every line: `#`, `>`, a list marker, a thematic break, a
+ * - At the start of every line: an ATX heading opener (`#` to `######` before
+ *   a space, a tab, or the line end), a line of `#` alone, which a heading
+ *   would read as its closing sequence, `>`, a list marker, a thematic break, a
  *   setext underline, and a GFM table delimiter row.
  * - At the end of every line, the last `#` of a run a space or tab precedes
  *   (`abc #` → `abc \#`), which an ATX heading would drop as its closing
@@ -374,15 +485,26 @@ export function escapeMarkdownInlineWithLiterals(
   return escapeLines(text, literals.length === 0 ? undefined : literalTrie(literals));
 }
 
-/** Escapes `text` line by line, joining the lines with hard breaks. */
+/**
+ * Escapes `text` line by line, joining the lines with hard breaks; a final
+ * line break becomes `&#10;`. Lines are read in place and the output built in
+ * chunks, so memory stays proportional to the output however many lines
+ * `text` holds.
+ */
 function escapeLines(text: string, literals: LiteralNode | undefined): string {
-  const lines = text.replace(/\r\n?/g, '\n').split('\n');
-  let out = escapeLine(lines[0] as string, literals);
-  for (let i = 1; i < lines.length; i++) {
-    const line = lines[i] as string;
-    out += i === lines.length - 1 && line === '' ? '&#10;' : `\\\n${escapeLine(line, literals)}`;
+  const normalized = text.replace(/\r\n?/g, '\n');
+  let end = normalized.indexOf('\n');
+  if (end === -1) return escapeLine(normalized, literals);
+  const out = new Output();
+  out.add(escapeLine(normalized.slice(0, end), literals));
+  for (let start = end + 1; start < normalized.length; start = end + 1) {
+    end = normalized.indexOf('\n', start);
+    if (end === -1) end = normalized.length;
+    out.add('\\\n');
+    out.add(escapeLine(normalized.slice(start, end), literals));
   }
-  return out;
+  if (normalized.endsWith('\n')) out.add('&#10;');
+  return out.join();
 }
 
 /**
