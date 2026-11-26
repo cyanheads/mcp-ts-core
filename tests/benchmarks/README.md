@@ -59,7 +59,7 @@ bun run bench:io --project http
 bun run bench:io --project native --testNamePattern SQLite
 ```
 
-The I/O lane uses ordinary Vitest tests with awaited cleanup. It fails on incorrect results, request timeouts, or cleanup errors, and has no speed thresholds. It runs serially, without coverage or telemetry exporters. `bench:io` resolves real Node even under Bun's PATH shim. Wrangler is the exact version pinned in `devDependencies`, with the Workerd it installs; no CLI is downloaded and no Cloudflare account, deployed service, or external API is used. Temporary Worker storage and native files are removed after each test.
+The I/O lane uses ordinary Vitest tests with awaited cleanup. It fails on incorrect results, request timeouts, or cleanup errors, and has no speed thresholds. It runs serially, without coverage or telemetry exporters. `bench:io` resolves real Node even under Bun's PATH shim. Wrangler is the `devDependencies` entry, at the version `bun.lock` pins, with the Workerd it installs; no CLI is downloaded and no Cloudflare account, deployed service, or external API is used. Temporary Worker storage and native files are removed after each test.
 
 | Workload | Fixed sizes | Measurement unit |
 | --- | --- | --- |

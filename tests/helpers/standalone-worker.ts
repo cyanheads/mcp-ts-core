@@ -11,7 +11,7 @@ import { assertBuildFresh } from './server-process.js';
 /** Start local Workerd with isolated temporary storage and explicit test bindings. */
 export async function startStandaloneWorker(secret: string) {
   assertBuildFresh();
-  // Wrangler is the exact version pinned in devDependencies; never download a CLI.
+  // Wrangler is this repo's devDependency, at the version bun.lock pins; never download a CLI.
   const nodeRequire = createRequire(import.meta.url);
   const { createTestHarness } = nodeRequire('wrangler') as Pick<
     typeof import('wrangler'),
