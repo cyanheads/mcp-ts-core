@@ -1,5 +1,5 @@
 /**
- * @fileoverview Root Vitest config. Uses Vitest 4 `projects` so unit, smoke,
+ * @fileoverview Root Vitest config. Uses Vitest `projects` so unit, smoke,
  * contract, compliance, fuzz, leak-gate, and typecheck suites live in a single
  * config and can be run individually by filter (`--project unit`) or all at once.
  * @module vitest.config

@@ -145,6 +145,7 @@ logs/
 coverage/
 !coverage/coverage-final.json
 reports/
+.vitest/
 
 # =============================================================================
 # CACHE & TEMPORARY FILES

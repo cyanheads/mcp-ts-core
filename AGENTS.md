@@ -524,7 +524,7 @@ describe('myTool', () => {
 
 **HTTP/session fixtures:** `createFetchMock(routes)` provides a strict fetch-compatible fake with ordered routes, captured `Request` objects, one-shot responses, and optional global install/restore. `createMockSession(options)` returns `{ sessionId, tenantId, ctx }` for handlers that branch on durable HTTP session identity.
 
-**Schema assertions:** `expect(result).toEqual(expect.schemaMatching(myTool.output))` — Vitest 4's Standard Schema asymmetric matcher validates handler output against the definition's own Zod schema. Use when output is dynamic (timestamps, generated IDs); exact `toEqual` still wins when the full value is known.
+**Schema assertions:** `expect(result).toEqual(expect.schemaMatching(myTool.output))` — Vitest's Standard Schema asymmetric matcher validates handler output against the definition's own Zod schema. Use when output is dynamic (timestamps, generated IDs); exact `toEqual` still wins when the full value is known.
 
 **Fixture-based tests:** `mcpTest` from `/testing/vitest` (optional peer `vitest`) extends Vitest's `test` with per-test fixtures: `ctx` (fresh mock context), `session` (session-bound context), `fetchMock` (strict fetch fake, installed/restored around the test), and `storage` (fresh in-memory `StorageService`). Override fixtures via `.extend` with the function form only — a bare value would share one mutable context across every test in the file.
 

@@ -1,7 +1,7 @@
 /** @fileoverview Record selected runtime files so missing observer evidence fails the outer gate. */
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import type { Reporter } from 'vitest/reporters';
+import type { Reporter } from 'vitest/node';
 
 /** Uses public reporter hooks; no dependency on Vitest's internal leakSet. */
 export default class LeakReporter implements Reporter {

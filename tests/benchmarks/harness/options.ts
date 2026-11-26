@@ -1,8 +1,8 @@
 /**
- * @fileoverview Shared measurement budget and lane environment; each task runs serially after warmup.
+ * @fileoverview Shared measurement budget, result directory, and lane environment; each task runs serially after warmup.
  * @module tests/benchmarks/harness/options
  */
-import type { bench } from 'vitest';
+import type { BenchRunOptions } from 'vitest';
 
 /** Milliseconds and minimum iterations for each independent workload. */
 export const benchmarkOptions = {
@@ -10,7 +10,11 @@ export const benchmarkOptions = {
   warmupTime: 250,
   iterations: 64,
   warmupIterations: 16,
-} satisfies Parameters<typeof bench>[2];
+} satisfies BenchRunOptions;
+
+/** Where this run's results land, relative to the repository root. */
+export const resultDirectory =
+  process.env.BENCH_OUTPUT_DIR ?? `reports/benchmarks/${process.versions.bun ? 'bun' : 'node'}`;
 
 /** Keeps logging, telemetry, and transport setup off every measured path. */
 export const benchmarkEnv = {

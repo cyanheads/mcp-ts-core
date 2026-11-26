@@ -79,17 +79,14 @@ expect.extend({
 });
 
 // ---------------------------------------------------------------------------
-// Type augmentation for the custom matchers. The `T = any` default must match
-// Vitest's `Assertion<T = any>` or TS emits "declarations must have identical
-// type parameters".
+// Type augmentation for the custom matchers. Vitest derives both `expect()`
+// assertions and the asymmetric `expect.*` forms from `Matchers<R, T>`, where
+// `R` is `void` for a synchronous assertion and `Promise<void>` through
+// `.resolves` / `.rejects`.
 // ---------------------------------------------------------------------------
 declare module 'vitest' {
-  interface Assertion<T = any> {
-    toBeMcpError(code?: JsonRpcErrorCode): T;
-    toHaveJsonRpcCode(code: JsonRpcErrorCode): T;
-  }
-  interface AsymmetricMatchersContaining {
-    toBeMcpError(code?: JsonRpcErrorCode): unknown;
-    toHaveJsonRpcCode(code: JsonRpcErrorCode): unknown;
+  interface Matchers<R, T> {
+    toBeMcpError(code?: JsonRpcErrorCode): R;
+    toHaveJsonRpcCode(code: JsonRpcErrorCode): R;
   }
 }

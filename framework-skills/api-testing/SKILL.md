@@ -4,7 +4,7 @@ description: >
   Testing patterns for MCP tool/resource handlers using `createMockContext` and Vitest. Covers mock context options, handler testing, McpError assertions, format testing, Vitest config setup, and test isolation conventions.
 metadata:
   author: cyanheads
-  version: "1.17"
+  version: "1.18"
   audience: external
   type: reference
 ---
@@ -439,7 +439,7 @@ export default mergeConfig(coreConfig, defineConfig({
 }));
 ```
 
-`mergeConfig` deep-merges the framework base with your overrides. The base sets `globals: true` (`describe`, `it`, `expect`, etc. available without imports), `pool: 'forks'` and `isolate: true` (test files run in separate worker processes), and `ssr: { noExternal: ['zod'] }` for Zod 4 compatibility. The `resolve.alias` entry maps `@/` to `src/`, matching the `paths` alias in `tsconfig.json` so imports like `@/services/...` resolve correctly in tests.
+`mergeConfig` deep-merges the framework base with your overrides. The base sets `globals: true` (`describe`, `it`, `expect`, etc. available without imports), `pool: 'forks'` and `isolate: true` (test files run in separate worker processes), and `ssr: { noExternal: ['zod'] }` for Zod 4 compatibility. The forks pool starts under both Node and Bun (`[run] bun = true` in `bunfig.toml`) on Vitest 4.x, 5.1.0, and 5.1.2 or later; Vitest 5.1.1 cannot start a forks worker under Bun, so the template requires `^5.1.2` and needs no `pool` override. The `resolve.alias` entry maps `@/` to `src/`, matching the `paths` alias in `tsconfig.json` so imports like `@/services/...` resolve correctly in tests.
 
 ---
 
@@ -490,7 +490,7 @@ Use `.rejects.toThrow(McpError)` to assert type only. Use `.rejects.toMatchObjec
 
 ## Output schema assertions
 
-`expect.schemaMatching` (Vitest 4, Standard Schema) validates a value against any Zod schema — including the definition's own `output`. Use it to assert schema conformance without duplicating the shape in the test:
+`expect.schemaMatching` (Standard Schema) validates a value against any Zod schema — including the definition's own `output`. Use it to assert schema conformance without duplicating the shape in the test:
 
 ```ts
 it('output conforms to the declared output schema', async () => {

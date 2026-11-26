@@ -11,13 +11,13 @@ import { assertBuildFresh } from './server-process.js';
 /** Start local Workerd with isolated temporary storage and explicit test bindings. */
 export async function startStandaloneWorker(secret: string) {
   assertBuildFresh();
-  // Wrangler is pinned by the installed Cloudflare test pool; never download a CLI.
-  const poolRequire = createRequire(import.meta.resolve('@cloudflare/vitest-pool-workers'));
-  const { createTestHarness } = poolRequire('wrangler') as Pick<
+  // Wrangler is the exact version pinned in devDependencies; never download a CLI.
+  const nodeRequire = createRequire(import.meta.url);
+  const { createTestHarness } = nodeRequire('wrangler') as Pick<
     typeof import('wrangler'),
     'createTestHarness'
   >;
-  const wranglerVersion = (poolRequire('wrangler/package.json') as { version: string }).version;
+  const wranglerVersion = (nodeRequire('wrangler/package.json') as { version: string }).version;
   const root = await mkdtemp(join(tmpdir(), 'mcp-worker-test-'));
   const server = createTestHarness({
     root,

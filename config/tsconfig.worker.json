@@ -20,8 +20,8 @@
     "types": [
       "node",
       "@cloudflare/workers-types",
-      "@cloudflare/vitest-pool-workers",
-      "@cloudflare/vitest-pool-workers/types"
+      "@cloudflare/vitest-plugin",
+      "@cloudflare/vitest-plugin/types"
     ],
     "paths": {
       "@/*": ["../dist/*"],

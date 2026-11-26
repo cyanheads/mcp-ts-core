@@ -19,11 +19,10 @@ export default defineConfig({
     fileParallelism: false,
     isolate: true,
     env: { ...benchmarkEnv },
-    runner: './tests/benchmarks/harness/runner.ts',
+    setupFiles: ['./tests/benchmarks/harness/setup.ts'],
     globalSetup: ['./tests/benchmarks/harness/environment.ts'],
     benchmark: {
       include: ['tests/benchmarks/micro/**/*.bench.ts'],
-      outputJson: `reports/benchmarks/${process.versions.bun ? 'bun' : 'node'}.json`,
     },
   },
 });

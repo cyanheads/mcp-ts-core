@@ -17,6 +17,6 @@
     "ignorePatterns": ["examples"]
   },
   "outdated": {
-    "allowlist": ["typescript-v6", "vitest", "@vitest/ui", "@vitest/coverage-istanbul"]
+    "allowlist": ["typescript-v6"]
   }
 }

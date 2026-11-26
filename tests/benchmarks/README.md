@@ -3,14 +3,14 @@
 Run the same fixed workloads before and after an optimization:
 
 ```sh
-bun run bench --outputJson reports/benchmarks/bun-before.json
-bun run bench --compare reports/benchmarks/bun-before.json --outputJson reports/benchmarks/bun-after.json
+BENCH_OUTPUT_DIR=reports/benchmarks/bun-before bun run bench
+BENCH_OUTPUT_DIR=reports/benchmarks/bun-after BENCH_BASELINE_DIR=reports/benchmarks/bun-before bun run bench
 
-bun run bench:node --outputJson reports/benchmarks/node-before.json
-bun run bench:node --compare reports/benchmarks/node-before.json --outputJson reports/benchmarks/node-after.json
+BENCH_OUTPUT_DIR=reports/benchmarks/node-before bun run bench:node
+BENCH_OUTPUT_DIR=reports/benchmarks/node-after BENCH_BASELINE_DIR=reports/benchmarks/node-before bun run bench:node
 ```
 
-Both commands run once. Use only successful, complete runs as baselines; the runner can write a partial report when a workload fails. Without `--outputJson`, they overwrite `reports/benchmarks/bun.json` or `node.json`. Each result has a companion `.environment.json` with the runtime version, CPU, OS, framework version, Git revision, dirty-tree flag, and measurement settings. Reports are gitignored. Keep the result and environment files together; for a dirty tree, also retain the source diff and any new workload files outside the timed run.
+Both commands run once. Each workload writes its result to `<name>.json` in `BENCH_OUTPUT_DIR`, a path relative to the repository root that defaults to `reports/benchmarks/bun` or `reports/benchmarks/node` and is overwritten on the next run into it. With `BENCH_BASELINE_DIR` set, each workload runs beside the same workload's saved result and prints both; a workload with no saved result fails. A failed workload writes no result, so use only successful, complete runs as baselines. Each directory also holds `environment.json` with the runtime version, CPU, OS, framework version, Git revision, dirty-tree flag, and measurement settings. Reports are gitignored. Keep the result and environment files together; for a dirty tree, also retain the source diff and any new workload files outside the timed run.
 
 `bench:node` resolves an actual Node binary even when Bun's run configuration shadows `node`. The environment file records the runtime that executed the command. Compare Node with Node and Bun with Bun, using the same runtime version and machine.
 
@@ -38,13 +38,13 @@ bun run bench storage
 bun run bench:node tool-pipeline --testNamePattern '100 records'
 ```
 
-Use a quiet machine on stable power. Run the baseline and candidate several times, alternating their order when practical. Check sample count and relative margin of error (RME); if variation is comparable to the claimed improvement, the result is inconclusive. Vitest's within-suite “fastest” labels compare different workloads, not equivalent implementations. Compare each named workload with its own saved result. Do not interpret throughput as HTTP request throughput or microbenchmark percentiles as end-to-end latency percentiles.
+Use a quiet machine on stable power. Run the baseline and candidate several times, alternating their order when practical. Check sample count and relative margin of error (RME); if variation is comparable to the claimed improvement, the result is inconclusive. Each workload's table holds only that workload and, in a comparison run, its baseline; the “fastest” label marks the faster of the two. Do not interpret throughput as HTTP request throughput or microbenchmark percentiles as end-to-end latency percentiles.
 
 These microbenchmarks complement the I/O lane below. Cold startup, memory profiling, and telemetry-export cost remain separate measurements. Keep input sizes and benchmark names stable during a comparison; changing the workload requires a new baseline.
 
-Runner reference: [Vitest benchmark configuration](https://v4.vitest.dev/config/benchmark).
+Runner reference: [Vitest benchmarking](https://vitest.dev/guide/benchmarking).
 
-Vitest 4 benchmarks use Tinybench `setup`/`teardown` options, not ordinary test hooks. Setup is awaited; teardown must remain synchronous in the installed Tinybench version. The small benchmark runner adds awaited logger initialization and shutdown around each file.
+Each workload is a Vitest test that runs one registration of the `bench` fixture through `harness/workload.ts`. Its setup and teardown checks are Tinybench `beforeAll`/`afterAll` hooks, which run once around the warmup phase and once around the measured phase. `harness/setup.ts` initializes logging before a file's workloads and closes it after them.
 
 ## HTTP, Worker, and native I/O
 
@@ -59,7 +59,7 @@ bun run bench:io --project http
 bun run bench:io --project native --testNamePattern SQLite
 ```
 
-The I/O lane uses ordinary Vitest tests with awaited cleanup. It fails on incorrect results, request timeouts, or cleanup errors, and has no speed thresholds. It runs serially, without coverage or telemetry exporters. `bench:io` resolves real Node even under Bun's PATH shim. Wrangler and Workerd are the versions installed with `@cloudflare/vitest-pool-workers`; no CLI is downloaded and no Cloudflare account, deployed service, or external API is used. Temporary Worker storage and native files are removed after each test.
+The I/O lane uses ordinary Vitest tests with awaited cleanup. It fails on incorrect results, request timeouts, or cleanup errors, and has no speed thresholds. It runs serially, without coverage or telemetry exporters. `bench:io` resolves real Node even under Bun's PATH shim. Wrangler is the exact version pinned in `devDependencies`, with the Workerd it installs; no CLI is downloaded and no Cloudflare account, deployed service, or external API is used. Temporary Worker storage and native files are removed after each test.
 
 | Workload | Fixed sizes | Measurement unit |
 | --- | --- | --- |

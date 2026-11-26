@@ -1,9 +1,9 @@
 /**
- * @fileoverview Worker lane: the framework under real workerd via @cloudflare/vitest-pool-workers.
+ * @fileoverview Worker lane: the framework under real workerd via @cloudflare/vitest-plugin.
  * @module tests/config/vitest.worker
  */
 import { resolve } from 'node:path';
-import { cloudflareTest } from '@cloudflare/vitest-pool-workers';
+import { cloudflareTest } from '@cloudflare/vitest-plugin';
 import { defineConfig } from 'vitest/config';
 
 const repoRoot = resolve(import.meta.dirname, '../..');

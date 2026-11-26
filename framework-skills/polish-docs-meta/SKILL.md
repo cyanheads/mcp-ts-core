@@ -4,7 +4,7 @@ description: >
   Finalize documentation and project metadata for a ship-ready MCP server. Use after implementation is complete, tests pass, and devcheck is clean. Safe to run at any stage — each step checks current state and only acts on what still needs work.
 metadata:
   author: cyanheads
-  version: "2.27"
+  version: "2.28"
   audience: external
   type: workflow
 ---
@@ -118,16 +118,7 @@ Common keywords shared across MCP servers (e.g., `mcp`, `mcp-server`, `model-con
 
 ### 8. `bunfig.toml`
 
-Verify a `bunfig.toml` exists at the project root. If not, create one:
-
-```toml
-[install]
-auto = "fallback"
-frozenLockfile = false
-
-[run]
-bun = true
-```
+Verify a `bunfig.toml` exists at the project root. If not, copy the framework's template, `node_modules/@cyanheads/mcp-ts-core/templates/_bunfig.toml`, to `bunfig.toml`. It blocks package versions under a day old (the framework excepted), runs the Socket install scanner (`@socketsecurity/bun-security-scanner` in `devDependencies`), and sets `[run] bun = true`, so scripts and Vitest workers run on Bun.
 
 ### 9. Changelog
 

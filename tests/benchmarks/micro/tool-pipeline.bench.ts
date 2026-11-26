@@ -2,7 +2,7 @@
  * @fileoverview Tool input/output parsing, Context, formatting, and enrichment at fixed payload sizes.
  * @module tests/benchmarks/micro/tool-pipeline.bench
  */
-import { bench, describe, expect } from 'vitest';
+import { describe, expect, test } from 'vitest';
 import { z } from 'zod';
 import { tool } from '@/mcp-server/tools/utils/toolDefinition.js';
 import { createToolHandler } from '@/mcp-server/tools/utils/toolHandlerFactory.js';
@@ -10,7 +10,7 @@ import { StorageService } from '@/storage/core/StorageService.js';
 import { InMemoryProvider } from '@/storage/providers/inMemory/inMemoryProvider.js';
 import { logger } from '@/utils/internal/logger.js';
 import { makeServerContext } from '../../helpers/server-context.js';
-import { benchmarkOptions } from '../harness/options.js';
+import { runWorkload } from '../harness/workload.js';
 
 const rowSchema = z.object({
   id: z.number().int().describe('Record ID.'),
@@ -67,20 +67,21 @@ for (const size of [1, 100, 1_000]) {
           expect(observed).toHaveProperty('content.0.text', JSON.stringify({ rows }, null, 2));
         }
       };
-      bench(
-        def.name,
-        async () => {
-          observed = await handler({ limit: size }, serverContext);
-        },
-        {
-          ...benchmarkOptions,
-          setup: async () => {
-            observed = await handler({ limit: size }, serverContext);
-            check();
+      test(def.name, async (context) => {
+        await runWorkload(
+          context,
+          {
+            beforeAll: async () => {
+              observed = await handler({ limit: size }, serverContext);
+              check();
+            },
+            afterAll: check,
           },
-          teardown: check,
-        },
-      );
+          async () => {
+            observed = await handler({ limit: size }, serverContext);
+          },
+        );
+      });
     }
   });
 }
