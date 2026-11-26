@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { openSqliteHandle } from '@/services/mirror/sqlite/handle.js';
 import {
+  buildSchemaDdl,
   buildSchemaSql,
   DEFAULT_FTS_TOKENIZER,
   type SchemaSpec,
@@ -25,7 +26,70 @@ const baseSpec: SchemaSpec = {
   indexes: [{ columns: ['updated'] }],
 };
 
+/** What `buildSchemaSql(baseSpec)` returns: the exported function's output, seeds included. */
+const BASE_SPEC_SQL = `CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+
+CREATE TABLE IF NOT EXISTS papers (
+  id TEXT PRIMARY KEY NOT NULL,
+  title TEXT,
+  abstract TEXT,
+  updated TEXT
+);
+
+CREATE INDEX IF NOT EXISTS papers_updated_idx ON papers(updated);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS papers_fts USING fts5(
+  title,
+  abstract,
+  content='papers',
+  content_rowid='rowid',
+  tokenize="unicode61 remove_diacritics 2"
+);
+
+CREATE TRIGGER IF NOT EXISTS papers_ai AFTER INSERT ON papers BEGIN
+  INSERT INTO papers_fts(rowid, title, abstract) VALUES (new.rowid, new.title, new.abstract);
+END;
+
+CREATE TRIGGER IF NOT EXISTS papers_ad AFTER DELETE ON papers BEGIN
+  INSERT INTO papers_fts(papers_fts, rowid, title, abstract) VALUES ('delete', old.rowid, old.title, old.abstract);
+END;
+
+CREATE TRIGGER IF NOT EXISTS papers_au AFTER UPDATE ON papers BEGIN
+  INSERT INTO papers_fts(papers_fts, rowid, title, abstract) VALUES ('delete', old.rowid, old.title, old.abstract);
+  INSERT INTO papers_fts(rowid, title, abstract) VALUES (new.rowid, new.title, new.abstract);
+END;
+
+CREATE TABLE IF NOT EXISTS mirror_sync_state (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  status TEXT NOT NULL,
+  cursor TEXT,
+  checkpoint TEXT,
+  started_at TEXT,
+  completed_at TEXT,
+  total INTEGER,
+  error TEXT,
+  mode TEXT
+);
+
+INSERT OR IGNORE INTO mirror_sync_state(id, status) VALUES (1, 'pending');
+
+CREATE TABLE IF NOT EXISTS mirror_sync_lease (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  owner TEXT,
+  generation INTEGER NOT NULL DEFAULT 0,
+  expires_at INTEGER
+);
+
+INSERT OR IGNORE INTO mirror_sync_lease(id, generation) VALUES (1, 0);`;
+
+const STATE_SEED = "INSERT OR IGNORE INTO mirror_sync_state(id, status) VALUES (1, 'pending');";
+const LEASE_SEED = 'INSERT OR IGNORE INTO mirror_sync_lease(id, generation) VALUES (1, 0);';
+
 describe('buildSchemaSql', () => {
+  it('returns every DDL statement and both seed rows, in order', () => {
+    expect(buildSchemaSql(baseSpec)).toBe(BASE_SPEC_SQL);
+  });
+
   it('declares the primary key on the named column', () => {
     const sql = buildSchemaSql(baseSpec);
     expect(sql).toContain('id TEXT PRIMARY KEY NOT NULL');
@@ -72,6 +136,22 @@ describe('buildSchemaSql', () => {
     const sql = buildSchemaSql(baseSpec);
     expect(sql).toContain('CREATE TABLE IF NOT EXISTS mirror_sync_lease');
     expect(sql).toContain('INSERT OR IGNORE INTO mirror_sync_lease(id, generation) VALUES (1, 0)');
+  });
+});
+
+describe('buildSchemaDdl', () => {
+  it('is buildSchemaSql without its two seed rows', () => {
+    expect(BASE_SPEC_SQL).toContain(STATE_SEED);
+    expect(BASE_SPEC_SQL).toContain(LEASE_SEED);
+    expect(buildSchemaDdl(baseSpec)).toBe(
+      BASE_SPEC_SQL.replace(`\n\n${STATE_SEED}`, '').replace(`\n\n${LEASE_SEED}`, ''),
+    );
+  });
+
+  it('validates the spec as buildSchemaSql does', () => {
+    expect(() => buildSchemaDdl({ ...baseSpec, primaryKey: 'missing' })).toThrowError(
+      expect.objectContaining({ code: JsonRpcErrorCode.ConfigurationError }),
+    );
   });
 });
 
@@ -158,6 +238,54 @@ describe('generated DDL executes', () => {
     expect(() => handle.exec(buildSchemaSql(baseSpec))).not.toThrow();
     expect(handle.prepare('SELECT COUNT(*) AS n FROM mirror_sync_lease').get()).toEqual({ n: 1 });
     handle.close();
+  });
+
+  it('creates every table from buildSchemaDdl and leaves both singleton tables empty', async () => {
+    const handle = await openSqliteHandle(join(dir, 'ddl.db'));
+    try {
+      handle.exec(buildSchemaDdl(baseSpec));
+      expect(
+        handle
+          .prepare<{ name: string }>(
+            `SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'papers_fts_%' ORDER BY name`,
+          )
+          .all()
+          .map((r) => r.name),
+      ).toEqual([
+        'mirror_sync_lease',
+        'mirror_sync_state',
+        'papers',
+        'papers_fts',
+        'schema_version',
+      ]);
+      expect(handle.prepare('SELECT COUNT(*) AS n FROM mirror_sync_state').get()).toEqual({ n: 0 });
+      expect(handle.prepare('SELECT COUNT(*) AS n FROM mirror_sync_lease').get()).toEqual({ n: 0 });
+    } finally {
+      handle.close();
+    }
+  });
+
+  it("runs buildSchemaDdl on an initialized store under another connection's write lock, where buildSchemaSql's seeds wait for it", async () => {
+    const path = join(dir, 'held.db');
+    const setup = await openSqliteHandle(path);
+    setup.exec(buildSchemaSql(baseSpec));
+    setup.close();
+
+    // Fails at once rather than waiting on a lock.
+    const opener = await openSqliteHandle(path, { busyTimeoutMs: 0 });
+    const holder = await openSqliteHandle(path);
+    try {
+      holder.exec('BEGIN IMMEDIATE');
+      holder.prepare(`INSERT INTO papers(id) VALUES ('held')`).run();
+      expect(() => opener.exec(buildSchemaDdl(baseSpec))).not.toThrow();
+      expect(() => opener.exec(buildSchemaSql(baseSpec))).toThrowError(
+        expect.objectContaining({ code: expect.stringMatching(/^SQLITE_BUSY/) }),
+      );
+    } finally {
+      holder.exec('ROLLBACK');
+      holder.close();
+      opener.close();
+    }
   });
 
   it('creates the sync state row with the mode column last, where adding it to an older store puts it', async () => {

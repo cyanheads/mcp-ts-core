@@ -108,16 +108,32 @@ async function step(barrier: BarrierStep | undefined): Promise<void> {
   await waitAsync(barrier?.waitFor);
 }
 
+/** Marks this process's arrival at `meet`, and returns a check of whether every expected process has arrived. */
+function arrive(meet: Rendezvous): () => boolean {
+  signal(`${meet.barrier}-${process.pid}`);
+  return () =>
+    readdirSync(barrierDir()).filter((name) => name.startsWith(`${meet.barrier}-`)).length >=
+    meet.processes;
+}
+
 /** Marks this process's arrival at the rendezvous, then waits until every expected process has arrived. */
 async function rendezvous(meet: Rendezvous | undefined): Promise<void> {
   if (!meet) return;
-  signal(`${meet.barrier}-${process.pid}`);
-  const arrived = () =>
-    readdirSync(barrierDir()).filter((name) => name.startsWith(`${meet.barrier}-`)).length;
+  const filled = arrive(meet);
   const deadline = performance.now() + BARRIER_DEADLINE_MS;
-  while (arrived() < meet.processes) {
+  while (!filled()) {
     if (performance.now() > deadline) throw new Error(`Rendezvous "${meet.barrier}" never filled.`);
     await delay(POLL_MS);
+  }
+}
+
+/** {@link rendezvous}, blocking the thread — for waits inside synchronous driver calls. */
+function rendezvousSync(meet: Rendezvous): void {
+  const filled = arrive(meet);
+  const deadline = performance.now() + BARRIER_DEADLINE_MS;
+  while (!filled()) {
+    if (performance.now() > deadline) throw new Error(`Rendezvous "${meet.barrier}" never filled.`);
+    Atomics.wait(cell, 0, 0, POLL_MS);
   }
 }
 
@@ -159,11 +175,11 @@ interface DriverPrototype {
 }
 
 /**
- * Runs `pause` once, right after the first read of the sync state table's
- * columns returns. The store makes that read through the runtime's driver, and
- * the driver's `prepare` is the one seam below the store, so this wraps it.
+ * Runs `pause` once, right after the first read through a statement whose SQL
+ * `matches` returns. The store makes its reads through the runtime's driver,
+ * and the driver's `prepare` is the one seam below the store, so this wraps it.
  */
-async function pauseAfterModeCheck(pause: BarrierStep): Promise<void> {
+async function pauseAfterRead(matches: (sql: string) => boolean, pause: () => void): Promise<void> {
   const driver: { prototype: DriverPrototype } = process.versions.bun
     ? (await import(BUN_SQLITE)).Database
     : (await import(BETTER_SQLITE3)).default;
@@ -171,22 +187,27 @@ async function pauseAfterModeCheck(pause: BarrierStep): Promise<void> {
   let paused = false;
   driver.prototype.prepare = function (sql, ...rest) {
     const statement = prepare.call(this, sql, ...rest);
-    if (paused || !sql.includes('table_info') || !sql.includes('mirror_sync_state')) {
-      return statement;
-    }
+    if (paused || !matches(sql)) return statement;
     const get = statement.get.bind(statement);
     statement.get = (...params) => {
       const row = get(...params);
       if (!paused) {
         paused = true;
-        signal(pause.signal);
-        waitSync(pause.waitFor);
+        pause();
       }
       return row;
     };
     return statement;
   };
 }
+
+/** The open's check for the `mode` column: a read of the sync state table's columns. */
+const isModeCheck = (sql: string) =>
+  sql.includes('table_info') && sql.includes('mirror_sync_state');
+
+/** The open's check for the singleton rows: the one read of both the sync state and lease tables. */
+const isSeedRead = (sql: string) =>
+  sql.includes('mirror_sync_state') && sql.includes('mirror_sync_lease');
 
 /** `migration` with `pause` run on the first read of its `version`. */
 function pausedAtVersionRead(migration: Migration, pause: BarrierStep): Migration {
@@ -207,7 +228,16 @@ function pausedAtVersionRead(migration: Migration, pause: BarrierStep): Migratio
 async function openStore(open: OpenTask): Promise<OpenReport> {
   await waitAsync(open.startAfter);
   await rendezvous(open.startWith);
-  if (open.pauseAfterModeCheck) await pauseAfterModeCheck(open.pauseAfterModeCheck);
+  const { pauseAfterModeCheck, pauseAfterSeedRead } = open;
+  if (pauseAfterModeCheck) {
+    await pauseAfterRead(isModeCheck, () => {
+      signal(pauseAfterModeCheck.signal);
+      waitSync(pauseAfterModeCheck.waitFor);
+    });
+  }
+  if (pauseAfterSeedRead) {
+    await pauseAfterRead(isSeedRead, () => rendezvousSync(pauseAfterSeedRead));
+  }
   let upCalls = 0;
   const migrations = open.migrations.map((spec, index) => {
     const migration = migrationFor(spec, () => {

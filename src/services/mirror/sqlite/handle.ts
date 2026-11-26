@@ -34,8 +34,8 @@ import frameworkPackageJson from '../../../../package.json' with { type: 'json' 
  * column), a `bigint` in the signed 64-bit range as an integer, and bytes (an
  * `ArrayBuffer`, `SharedArrayBuffer`, `DataView`, typed array, or `Buffer`) as
  * a blob of the bytes they view. A `bigint` outside that range is refused with
- * `ValidationError`, as is an object, array, or `Date` in the store's records,
- * tombstones, ids, filters, and `match`.
+ * `ValidationError`, as is an object, array, `Date`, function, or symbol in the
+ * store's records, tombstones, ids, filters, and `match`.
  */
 export type SqlValue = string | number | null;
 

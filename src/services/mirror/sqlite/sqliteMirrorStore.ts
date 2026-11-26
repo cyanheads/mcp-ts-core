@@ -30,7 +30,13 @@ import {
   openSqliteHandle,
   type SqliteHandle,
 } from './handle.js';
-import { buildSchemaSql, type SchemaSpec, validateSchemaSpec } from './schema.js';
+import {
+  buildSchemaDdl,
+  type SchemaSpec,
+  SYNC_LEASE_SEED,
+  SYNC_STATE_SEED,
+  validateSchemaSpec,
+} from './schema.js';
 
 /**
  * Opt-in ceilings on {@link MirrorStore.query} and {@link MirrorStore.getByIds}.
@@ -125,8 +131,14 @@ export function sqliteMirrorStore(spec: SqliteMirrorStoreSpec): MirrorStore {
         ...(spec.busyTimeoutMs !== undefined && { busyTimeoutMs: spec.busyTimeoutMs }),
       };
       const handle = await openSqliteHandle(spec.path, handleOptions);
+      /**
+       * Each step writes only what the file lacks, so a store at its spec's
+       * version opens without the write lock while another connection holds
+       * it; a new file, an upgrade, or a pending migration waits it out.
+       */
       try {
-        handle.exec(buildSchemaSql(spec));
+        handle.exec(buildSchemaDdl(spec));
+        seedSyncRows(handle);
         addSyncStateMode(handle);
         runMigrations(handle, spec.version ?? 1, spec.migrations ?? []);
       } catch (err) {
@@ -173,20 +185,25 @@ export function sqliteMirrorStore(spec: SqliteMirrorStoreSpec): MirrorStore {
       `INSERT INTO ${spec.table}(${cols.join(', ')}) VALUES (${placeholders}) ${conflict}`,
     );
     const remove = handle.prepare(`DELETE FROM ${spec.table} WHERE ${spec.primaryKey} = ?`);
-    // The position in an error is looked up only on the failure path.
+    /**
+     * A record supplies a column only through its own property, so a name it
+     * inherits (`constructor` or `toString` from `Object.prototype`, a class's
+     * getter) stores NULL as an omitted field does. The position in an error
+     * is looked up only on the failure path.
+     */
     for (const record of records) {
       upsert.run(
         ...cols.map((c) => {
-          const value = record[c] ?? null;
-          if (isObjectValue(value)) {
-            throw objectValueError(value, `records[${records.indexOf(record)}].${c}`);
+          const value = Object.hasOwn(record, c) ? (record[c] ?? null) : null;
+          if (isRefusedValue(value)) {
+            throw refusedValueError(value, `records[${records.indexOf(record)}].${c}`);
           }
           return value;
         }),
       );
     }
     for (const id of tombstones) {
-      if (isObjectValue(id)) throw objectValueError(id, `tombstones[${tombstones.indexOf(id)}]`);
+      if (isRefusedValue(id)) throw refusedValueError(id, `tombstones[${tombstones.indexOf(id)}]`);
       remove.run(id);
     }
   }
@@ -207,9 +224,10 @@ export function sqliteMirrorStore(spec: SqliteMirrorStoreSpec): MirrorStore {
         return claimed ? { owner, generation: claimed.generation, ttlMs } : undefined;
       } catch (err) {
         /**
-         * A write lock held past `busy_timeout`, met by the claim or by the
-         * open before it, belongs to a connection writing to the store right
-         * now: the store is in use, not unavailable.
+         * A write lock held past `busy_timeout`, met by the claim or by an
+         * open with a one-time write to make (a new file, an upgrade, a
+         * pending migration), belongs to a connection writing to the store
+         * right now: the store is in use, not unavailable.
          */
         if (isBusy(err) || (err instanceof Error && isBusy(err.cause))) return undefined;
         throw err;
@@ -260,7 +278,7 @@ export function sqliteMirrorStore(spec: SqliteMirrorStoreSpec): MirrorStore {
 
     async query(options: QueryOptions): Promise<QueryResult> {
       validateQueryOptions(options, limits);
-      if (isObjectValue(options.match)) throw objectValueError(options.match, 'match');
+      if (isRefusedValue(options.match)) throw refusedValueError(options.match, 'match');
       const store = await open();
       if (options.match && !store.hasFts) {
         throw validationError('This mirror has no FTS index; `match` is not supported.', {
@@ -353,8 +371,8 @@ export function sqliteMirrorStore(spec: SqliteMirrorStoreSpec): MirrorStore {
           max: limits.getByIds,
         });
       }
-      const objectAt = ids.findIndex(isObjectValue);
-      if (objectAt !== -1) throw objectValueError(ids[objectAt], `ids[${objectAt}]`);
+      const refusedAt = ids.findIndex(isRefusedValue);
+      if (refusedAt !== -1) throw refusedValueError(ids[refusedAt], `ids[${refusedAt}]`);
       if (ids.length === 0) return [];
       const { handle } = await open();
       /**
@@ -462,15 +480,17 @@ export function sqliteMirrorStore(spec: SqliteMirrorStoreSpec): MirrorStore {
 // ---------------------------------------------------------------------------
 
 /**
- * Whether `value` is an object, array, or `Date`, which the store refuses
- * wherever it binds a value. Bound alone, an object is each driver's
- * named-parameter list, so `bun:sqlite` binds the `?` as NULL (a record passed
- * as a tombstone deletes nothing) while `better-sqlite3` throws; bound beside
- * other values, each driver fails with its own error. Bytes (typed arrays,
+ * Whether `value` is an object, array, `Date`, function, or symbol, which the
+ * store refuses wherever it binds a value. Bound alone, an object is each
+ * driver's named-parameter list, so `bun:sqlite` binds the `?` as NULL (a
+ * record passed as a tombstone deletes nothing) while `better-sqlite3` throws;
+ * bound beside other values, each driver fails with its own error. A function
+ * or symbol meets a driver `TypeError` either way. Bytes (typed arrays,
  * `DataView`, `ArrayBuffer`, `SharedArrayBuffer`) go to the handle, which
  * binds them as a blob.
  */
-function isObjectValue(value: unknown): value is object {
+function isRefusedValue(value: unknown): value is object | symbol {
+  if (typeof value === 'function' || typeof value === 'symbol') return true;
   return (
     typeof value === 'object' &&
     value !== null &&
@@ -524,12 +544,19 @@ function jsonElement(value: unknown): string | undefined {
   }
 }
 
-/** The refusal of an {@link isObjectValue} value at `field`, naming its kind without echoing it. */
-function objectValueError(value: unknown, field: string): McpError {
-  const kind = Array.isArray(value) ? 'an array' : value instanceof Date ? 'a Date' : 'an object';
-  return validationError(`Mirror ${field} is ${kind}; it must be a string, a number, or null.`, {
-    field,
-  });
+/** The refusal of an {@link isRefusedValue} value at `field`, naming its kind without echoing it. */
+function refusedValueError(value: unknown, field: string): McpError {
+  return validationError(
+    `Mirror ${field} is ${refusedKind(value)}; it must be a string, a number, or null.`,
+    { field },
+  );
+}
+
+function refusedKind(value: unknown): string {
+  if (typeof value === 'function') return 'a function';
+  if (typeof value === 'symbol') return 'a symbol';
+  if (Array.isArray(value)) return 'an array';
+  return value instanceof Date ? 'a Date' : 'an object';
 }
 
 // ---------------------------------------------------------------------------
@@ -642,8 +669,8 @@ function buildFilterClauses(
         clauses.push('0'); // empty IN matches nothing
         continue;
       }
-      const objectAt = values.findIndex(isObjectValue);
-      if (objectAt !== -1) throw objectValueError(values[objectAt], at(objectAt));
+      const refusedAt = values.findIndex(isRefusedValue);
+      if (refusedAt !== -1) throw refusedValueError(values[refusedAt], at(refusedAt));
       const list = jsonList(values);
       if (list === undefined) {
         clauses.push(`${f.column} IN (${values.map(() => '?').join(', ')})`);
@@ -657,7 +684,7 @@ function buildFilterClauses(
     }
     // validateQueryOptions refused an unknown op and an array on a scalar one.
     const { value } = f;
-    if (isObjectValue(value)) throw objectValueError(value, at(0));
+    if (isRefusedValue(value)) throw refusedValueError(value, at(0));
     clauses.push(`${f.column} ${SQL_OP.get(f.op)} ?`);
     params.push(value);
   }
@@ -702,6 +729,28 @@ interface SyncStateRow {
   started_at: string | null;
   status: string;
   total: number | null;
+}
+
+/**
+ * Insert the `mirror_sync_state` and `mirror_sync_lease` singleton rows when
+ * either is missing: on a new file, or a store created before the lease table.
+ * The read comes first because an `INSERT` takes the write lock even when
+ * `OR IGNORE` leaves its row as it is, so a store that has both takes none.
+ * Processes opening a new file together can all find the rows missing;
+ * `OR IGNORE` lets each seed them, and only the first changes anything.
+ */
+function seedSyncRows(handle: SqliteHandle): void {
+  const seeded = handle
+    .prepare<{ seeded: number }>(
+      `SELECT EXISTS (SELECT 1 FROM mirror_sync_state WHERE id = 1)
+          AND EXISTS (SELECT 1 FROM mirror_sync_lease WHERE id = 1) AS seeded`,
+    )
+    .get();
+  if (seeded?.seeded === 1) return;
+  handle.transaction(() => {
+    handle.exec(SYNC_STATE_SEED);
+    handle.exec(SYNC_LEASE_SEED);
+  }, 'immediate');
 }
 
 /**

@@ -45,6 +45,13 @@ export interface OpenTask {
    */
   pauseAfterModeCheck?: BarrierStep;
   /**
+   * Runs once, right after the opener's read of whether the sync state and
+   * lease rows exist returns, made before it takes the write lock to seed
+   * them: the opener waits there until every process of the rendezvous has
+   * made that read.
+   */
+  pauseAfterSeedRead?: Rendezvous;
+  /**
    * Runs on the first read of the first migration's `version`. The migration
    * runner reads a migration's version only after it has read the stored
    * version, so this pauses the opener between that read and anything it applies.

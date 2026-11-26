@@ -2,12 +2,13 @@
  * @fileoverview Tests for the SQLite mirror store — upsert/tombstone, generic
  * query (FTS, filters, sort, pagination), getByIds ordering, sync-state
  * round-trip with durable-marker preservation, the raw-handle escape hatch,
- * integrity check, and the schema-version migration runner.
+ * integrity check, the schema-version migration runner, which record fields a
+ * write reads, and opening during another connection's write.
  * @module tests/unit/services/mirror/sqliteMirrorStore
  */
 
 import { existsSync } from 'node:fs';
-import { mkdir, mkdtemp, open, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, open, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -971,6 +972,8 @@ describe('sqliteMirrorStore value binding', () => {
     ['an object', { token: 'secret-value-1' }],
     ['an array', ['secret-value-1']],
     ['a Date', new Date('2031-02-03T04:05:06.000Z')],
+    ['a function', () => 'secret-value-1'],
+    ['a symbol', Symbol('secret-value-1')],
   ])(
     'rejects %s as a record value, naming its column without echoing it, and writes nothing of the batch',
     async (kind, value) => {
@@ -1022,6 +1025,41 @@ describe('sqliteMirrorStore value binding', () => {
       store.query({ match: untyped({ q: 'x' }), limit: 1, offset: 0 }),
     ).rejects.toMatchObject(validation('match', 'an object'));
   });
+
+  it.each([
+    ['a function', () => 'x'],
+    ['a symbol', Symbol('x')],
+  ])(
+    'rejects %s as a tombstone, a getByIds id, a filter value, an in-list element, and a match, naming each',
+    async (kind, value) => {
+      await expect(store.applyBatch([], [untyped(value)])).rejects.toMatchObject(
+        validation('tombstones[0]', kind),
+      );
+      await expect(store.getByIds(['a', untyped(value)])).rejects.toMatchObject(
+        validation('ids[1]', kind),
+      );
+      await expect(
+        store.query({
+          filters: [{ column: 'flag', op: 'eq', value: untyped(value) }],
+          limit: 1,
+          offset: 0,
+        }),
+      ).rejects.toMatchObject(validation('filters[0].value', kind));
+      await expect(
+        store.query({
+          filters: [
+            { column: 'note', op: 'eq', value: 'x' },
+            { column: 'flag', op: 'in', value: [1, untyped(value)] },
+          ],
+          limit: 1,
+          offset: 0,
+        }),
+      ).rejects.toMatchObject(validation('filters[1].value[1]', kind));
+      await expect(
+        store.query({ match: untyped(value), limit: 1, offset: 0 }),
+      ).rejects.toMatchObject(validation('match', kind));
+    },
+  );
 
   it.each<[string, () => unknown]>([
     ['an ArrayBuffer', () => new Uint8Array([1, 2]).buffer],
@@ -1080,6 +1118,148 @@ describe('sqliteMirrorStore value binding', () => {
       extra: '0102',
       extraType: 'blob',
     });
+  });
+});
+
+/**
+ * A record supplies a column only through its own property: a declared column
+ * it does not own stores NULL, whatever the column is named, so a name it
+ * inherits from `Object.prototype` or a class never poses as its data.
+ */
+describe('sqliteMirrorStore record fields', () => {
+  /** Every function-valued `Object.prototype` member whose name is a valid column identifier. */
+  const PROTOTYPE_NAMES = [
+    'constructor',
+    'toString',
+    'toLocaleString',
+    'valueOf',
+    'hasOwnProperty',
+    'isPrototypeOf',
+    'propertyIsEnumerable',
+    '__defineGetter__',
+    '__defineSetter__',
+    '__lookupGetter__',
+    '__lookupSetter__',
+  ] as const;
+
+  let dir: string;
+  const stores: MirrorStore[] = [];
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'mirror-store-fields-test-'));
+  });
+  afterEach(async () => {
+    await Promise.all(stores.splice(0).map((s) => s.close()));
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  function storeWith(columns: Record<string, string>): MirrorStore {
+    const created = sqliteMirrorStore({
+      path: join(dir, `fields-${stores.length}.db`),
+      table: 'items',
+      primaryKey: 'id',
+      columns,
+    });
+    stores.push(created);
+    return created;
+  }
+
+  /** `column` of row `id` as raw SQL reads it: its storage class and value. */
+  async function storedColumn(s: MirrorStore, column: string, id: string): Promise<unknown> {
+    return (await s.raw())
+      .prepare(`SELECT typeof(${column}) AS type, ${column} AS value FROM items WHERE id = ?`)
+      .get(id);
+  }
+
+  it('covers every function-valued Object.prototype member a column can be named after', () => {
+    const prototype = Object.prototype as unknown as Record<string, unknown>;
+    const names = Object.getOwnPropertyNames(prototype).filter(
+      (name) => typeof prototype[name] === 'function' && /^[A-Za-z_][A-Za-z0-9_]*$/.test(name),
+    );
+    expect(names.sort()).toEqual([...PROTOTYPE_NAMES].sort());
+  });
+
+  it.each(PROTOTYPE_NAMES)(
+    'stores NULL in a column named %s for a record that omits it, and the value a record supplies',
+    async (name) => {
+      const s = storeWith({ id: 'TEXT', [name]: 'TEXT' });
+      await s.applyBatch([{ id: 'omits' }, { id: 'supplies', [name]: 'Ferrari' }], []);
+      expect(await storedColumn(s, name, 'omits')).toEqual({ type: 'null', value: null });
+      const rows = await s.getByIds(['omits', 'supplies']);
+      expect(rows.map((row) => Object.entries(row))).toEqual([
+        [
+          ['id', 'omits'],
+          [name, null],
+        ],
+        [
+          ['id', 'supplies'],
+          [name, 'Ferrari'],
+        ],
+      ]);
+    },
+  );
+
+  it('stores NULL in each such column for a record a runSync page commits without it', async () => {
+    const s = storeWith({
+      id: 'TEXT',
+      ...Object.fromEntries(PROTOTYPE_NAMES.map((name) => [name, 'TEXT'])),
+    });
+    const mirror = defineMirror({
+      name: 'fields',
+      logger: {},
+      store: s,
+      async *sync(): AsyncGenerator<SyncPage> {
+        yield { records: [{ id: 'omits' }, { id: 'supplies', constructor: 'Ferrari' }] };
+      },
+    });
+    await expect(mirror.runSync({ mode: 'init' })).resolves.toMatchObject({
+      recordsApplied: 2,
+      total: 2,
+    });
+    const [omits, supplies] = await s.getByIds(['omits', 'supplies']);
+    expect(Object.entries(omits ?? {})).toEqual([
+      ['id', 'omits'],
+      ...PROTOTYPE_NAMES.map((name) => [name, null]),
+    ]);
+    expect(Object.entries(supplies ?? {})).toEqual([
+      ['id', 'supplies'],
+      ...PROTOTYPE_NAMES.map((name) => [name, name === 'constructor' ? 'Ferrari' : null]),
+    ]);
+  });
+
+  it("reads an own getter, and stores NULL for a column a record omits or only inherits from its class's prototype", async () => {
+    const s = storeWith({ id: 'TEXT', title: 'TEXT' });
+    const ownGetter = Object.defineProperty({ id: 'own' }, 'title', {
+      enumerable: true,
+      get: () => 'from-own-getter',
+    });
+    const nullPrototype = Object.assign(Object.create(null) as MirrorRow, { id: 'bare' });
+    class Inherited {
+      id = 'inherited';
+      get title(): string {
+        return 'from-class-getter';
+      }
+    }
+    await s.applyBatch([ownGetter, nullPrototype, untyped(new Inherited()), { id: 'plain' }], []);
+    const titles = await Promise.all(
+      ['own', 'bare', 'inherited', 'plain'].map((id) => storedColumn(s, 'title', id)),
+    );
+    expect(titles).toEqual([
+      { type: 'text', value: 'from-own-getter' },
+      { type: 'null', value: null },
+      { type: 'null', value: null },
+      { type: 'null', value: null },
+    ]);
+  });
+
+  it('stores NULL in a __proto__ column, declared through JSON.parse, for a record that omits it', async () => {
+    const s = storeWith(JSON.parse('{"id":"TEXT","__proto__":"TEXT"}') as Record<string, string>);
+    await s.applyBatch(
+      [{ id: 'omits' }, JSON.parse('{"id":"supplies","__proto__":"P"}') as MirrorRow],
+      [],
+    );
+    expect(await storedColumn(s, '__proto__', 'omits')).toEqual({ type: 'null', value: null });
+    expect(await storedColumn(s, '__proto__', 'supplies')).toEqual({ type: 'text', value: 'P' });
   });
 });
 
@@ -2200,6 +2380,232 @@ describe('sqliteMirrorStore schema upgrade across processes', () => {
       expect(early).toEqual({ ok: true, upCalls: 0 });
       expect(late).toEqual({ ok: true, upCalls: 0 });
       await expectOneModeColumn();
+    },
+    PROCESS_TIMEOUT_MS,
+  );
+});
+
+/**
+ * A store opening while another connection holds the write lock with a write
+ * in flight. A store at its spec's version opens without the lock and reads
+ * what is committed; one with a one-time write to make still waits the lock
+ * out for `busyTimeoutMs`.
+ */
+describe("sqliteMirrorStore open during another connection's write", () => {
+  const BUSY_TIMEOUT_MS = 200;
+  const COMMITTED = {
+    status: 'complete',
+    checkpoint: '2024-05-01',
+    completedAt: '2024-05-01T00:00:00.000Z',
+    total: 1,
+  } as const;
+  const COMMITTED_READS = {
+    state: COMMITTED,
+    page: { rows: [rec('1', { title: 'committed' })], total: 1 },
+    ids: ['1'],
+    count: 1,
+  };
+  let dir: string;
+  let path: string;
+  let holder: SqliteHandle | undefined;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'mirror-open-held-test-'));
+    path = join(dir, 'mirror.db');
+    const seeded = sqliteMirrorStore(specFor(path));
+    await seeded.applyBatch([rec('1', { title: 'committed' })], []);
+    await seeded.writeState(COMMITTED);
+    await seeded.close();
+  });
+  afterEach(async () => {
+    if (holder) {
+      holder.exec('ROLLBACK');
+      holder.close();
+      holder = undefined;
+    }
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  /** Another connection on `target` holding the write lock, with a row and a state change it never commits. */
+  async function hold(target: string): Promise<void> {
+    holder = await openSqliteHandle(target);
+    holder.exec('BEGIN IMMEDIATE');
+    holder.prepare(`INSERT INTO papers(id, title) VALUES ('held', 'held')`).run();
+    holder.prepare(`UPDATE mirror_sync_state SET status = 'in_progress', total = 2`).run();
+  }
+
+  async function readsOf(store: MirrorStore) {
+    return {
+      state: await store.readState(),
+      page: await store.query({ limit: 10, offset: 0 }),
+      ids: (await store.getByIds(['1', 'held'])).map((row) => row.id),
+      count: await store.count(),
+    };
+  }
+
+  it('opens an initialized store at its version and reads the committed state and rows', async () => {
+    await hold(path);
+    const store = sqliteMirrorStore(specFor(path, { busyTimeoutMs: BUSY_TIMEOUT_MS }));
+    try {
+      expect(await readsOf(store)).toEqual(COMMITTED_READS);
+      await expect(store.syncLease!.claim('fresh', 1_000)).resolves.toBeUndefined();
+    } finally {
+      await store.close();
+    }
+  });
+
+  it('opens the same store to the same reads when no other connection holds the lock', async () => {
+    const store = sqliteMirrorStore(specFor(path, { busyTimeoutMs: BUSY_TIMEOUT_MS }));
+    try {
+      expect(await readsOf(store)).toEqual(COMMITTED_READS);
+      await expect(store.syncLease!.claim('fresh', 1_000)).resolves.toEqual({
+        owner: 'fresh',
+        generation: 1,
+        ttlMs: 1_000,
+      });
+    } finally {
+      await store.close();
+    }
+  });
+
+  it.each<[string, () => Promise<SqliteMirrorStoreSpec>]>([
+    [
+      'created without the mode column',
+      async () => {
+        const older = join(dir, 'older.db');
+        await writeStoreWithoutMode(specFor(older));
+        return specFor(older);
+      },
+    ],
+    [
+      'with a pending migration',
+      async () =>
+        specFor(path, {
+          version: 2,
+          migrations: [{ version: 2, up: (h) => h.exec('CREATE TABLE mig_log (x)') }],
+        }),
+    ],
+  ])(
+    'still waits out the lock for a store %s, rejecting DatabaseError with SQLITE_BUSY, and its claim resolves undefined',
+    async (_label, specOf) => {
+      const spec = await specOf();
+      await hold(spec.path);
+      const store = sqliteMirrorStore({ ...spec, busyTimeoutMs: BUSY_TIMEOUT_MS });
+      try {
+        await expect(store.readState()).rejects.toMatchObject({
+          code: JsonRpcErrorCode.DatabaseError,
+          cause: { code: 'SQLITE_BUSY' },
+        });
+        await expect(store.syncLease!.claim('fresh', 1_000)).resolves.toBeUndefined();
+      } finally {
+        await store.close();
+      }
+    },
+  );
+
+  it.each<[string, string, object]>([
+    ['both singleton rows', 'DELETE FROM mirror_sync_state; DELETE FROM mirror_sync_lease;', {}],
+    [
+      'the lease table, as a store from before the lease',
+      'DROP TABLE mirror_sync_lease;',
+      COMMITTED,
+    ],
+  ])(
+    'gives a store missing %s both rows on open, so writeState persists and a claim succeeds',
+    async (_label, sql, before) => {
+      const setup = await openSqliteHandle(path);
+      try {
+        setup.exec(sql);
+      } finally {
+        setup.close();
+      }
+      const store = sqliteMirrorStore(specFor(path));
+      try {
+        expect(await store.readState()).toEqual({ status: 'pending', ...before });
+        const written = { status: 'in_progress', mode: 'refresh', cursor: 'c1' } as const;
+        await store.writeState(written);
+        expect(await store.readState()).toMatchObject(written);
+        await expect(store.syncLease!.claim('fresh', 1_000)).resolves.toEqual({
+          owner: 'fresh',
+          generation: 1,
+          ttlMs: 1_000,
+        });
+      } finally {
+        await store.close();
+      }
+    },
+  );
+});
+
+/**
+ * Real processes opening one new store file together, on this runtime's
+ * driver. Each pauses after reading whether the singleton rows exist until
+ * every process has read them missing, so each then seeds them.
+ */
+describe('sqliteMirrorStore first open across processes', () => {
+  const PROCESS_TIMEOUT_MS = 60_000;
+  const PROCESSES = 6;
+  let dir: string;
+  let barriers: string;
+  let path: string;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'mirror-first-open-process-test-'));
+    barriers = join(dir, 'barriers');
+    await mkdir(barriers);
+    path = join(dir, 'new.db');
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it(
+    'opens in every process that read the rows missing before any seeded them, and seeds each row once',
+    async () => {
+      const reports = await Promise.all(
+        Array.from({ length: PROCESSES }, () =>
+          runMirrorProcess({
+            role: 'open',
+            barriers,
+            path,
+            version: 1,
+            migrations: [],
+            startWith: { barrier: 'start', processes: PROCESSES },
+            pauseAfterSeedRead: { barrier: 'seed-read', processes: PROCESSES },
+          }),
+        ),
+      );
+
+      expect(reports).toEqual(Array.from({ length: PROCESSES }, () => ({ ok: true, upCalls: 0 })));
+      expect(
+        (await readdir(barriers)).filter((name) => name.startsWith('seed-read-')),
+      ).toHaveLength(PROCESSES);
+      const handle = await openSqliteHandle(path);
+      try {
+        expect(handle.prepare('SELECT id, status, mode FROM mirror_sync_state').all()).toEqual([
+          { id: 1, status: 'pending', mode: null },
+        ]);
+        expect(
+          handle.prepare('SELECT id, owner, generation, expires_at FROM mirror_sync_lease').all(),
+        ).toEqual([{ id: 1, owner: null, generation: 0, expires_at: null }]);
+      } finally {
+        handle.close();
+      }
+      const store = sqliteMirrorStore({
+        path,
+        table: 'items',
+        primaryKey: 'id',
+        columns: { id: 'TEXT' },
+      });
+      try {
+        await expect(store.syncLease!.claim('after', 1_000)).resolves.toEqual({
+          owner: 'after',
+          generation: 1,
+          ttlMs: 1_000,
+        });
+      } finally {
+        await store.close();
+      }
     },
     PROCESS_TIMEOUT_MS,
   );

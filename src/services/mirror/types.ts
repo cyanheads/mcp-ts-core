@@ -10,7 +10,12 @@ import type { SqliteHandle, SqlValue } from './sqlite/handle.js';
 
 export type { SqliteHandle, SqliteStatement, SqlValue } from './sqlite/handle.js';
 
-/** One mirrored record — a flat object keyed by declared column name. */
+/**
+ * One mirrored record — a flat object keyed by declared column name. A record
+ * written to the store supplies a column only through its own property (an own
+ * getter included); a declared column it omits, or only inherits from its
+ * prototype, stores NULL.
+ */
 export type MirrorRow = Record<string, SqlValue>;
 
 /** Lifecycle state of a mirror's local dataset. */
@@ -106,7 +111,7 @@ export interface SyncPage {
   checkpoint?: string | undefined;
   /** Updated volatile resume position after this page. */
   cursor?: string | undefined;
-  /** Records to upsert (keyed by column name). */
+  /** Records to upsert, each supplying its columns as its own properties; an omitted column stores NULL. */
   records: MirrorRow[];
   /** Primary-key values to delete (deleted upstream records). */
   tombstones?: string[];

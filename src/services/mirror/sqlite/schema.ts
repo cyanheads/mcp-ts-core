@@ -1,8 +1,9 @@
 /**
  * @fileoverview DDL generation for the SQLite mirror store. Builds the primary
  * table, secondary indexes, an optional FTS5 external-content index with sync
- * triggers, the single-row `mirror_sync_state` and `mirror_sync_lease` tables,
- * and the `schema_version` table — all from a declarative column/FTS spec.
+ * triggers, the single-row `mirror_sync_state` and `mirror_sync_lease` tables
+ * with the statements that seed their rows, and the `schema_version` table —
+ * all from a declarative column/FTS spec.
  * @module services/mirror/sqlite/schema
  */
 
@@ -90,10 +91,68 @@ export function validateSchemaSpec(spec: SchemaSpec): { ftsColumns: string[]; to
 }
 
 /**
- * Build the full idempotent DDL for a mirror store. Safe to run on every open
- * (`CREATE … IF NOT EXISTS` throughout). Returns one SQL string.
+ * `mode` is last: a store created before it existed gains it on open by
+ * `ALTER TABLE … ADD COLUMN`, which appends, so both layouts match.
+ */
+const SYNC_STATE_TABLE = `CREATE TABLE IF NOT EXISTS mirror_sync_state (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  status TEXT NOT NULL,
+  cursor TEXT,
+  checkpoint TEXT,
+  started_at TEXT,
+  completed_at TEXT,
+  total INTEGER,
+  error TEXT,
+  mode TEXT
+);`;
+
+/**
+ * The cross-process sync lease: unheld while `owner` is NULL; `expires_at` is
+ * epoch ms. A framework table, so an existing store gains it on its next open
+ * without a migration of the server's own.
+ */
+const SYNC_LEASE_TABLE = `CREATE TABLE IF NOT EXISTS mirror_sync_lease (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  owner TEXT,
+  generation INTEGER NOT NULL DEFAULT 0,
+  expires_at INTEGER
+);`;
+
+/** The `mirror_sync_state` singleton row in its initial state; changes nothing once the row exists. */
+export const SYNC_STATE_SEED = `INSERT OR IGNORE INTO mirror_sync_state(id, status) VALUES (1, 'pending');`;
+
+/** The `mirror_sync_lease` singleton row, unheld; changes nothing once the row exists. */
+export const SYNC_LEASE_SEED = `INSERT OR IGNORE INTO mirror_sync_lease(id, generation) VALUES (1, 0);`;
+
+/**
+ * Build the full idempotent DDL for a mirror store, followed by the seed of
+ * each singleton row. Safe to run on every open (`CREATE … IF NOT EXISTS` and
+ * `INSERT OR IGNORE` throughout), though each seed takes the write lock even
+ * when its row exists: the store's own open runs {@link buildSchemaDdl} and
+ * seeds only a missing row. Returns one SQL string.
  */
 export function buildSchemaSql(spec: SchemaSpec): string {
+  return [
+    ...specDdl(spec),
+    SYNC_STATE_TABLE,
+    SYNC_STATE_SEED,
+    SYNC_LEASE_TABLE,
+    SYNC_LEASE_SEED,
+  ].join('\n\n');
+}
+
+/**
+ * {@link buildSchemaSql} without the seed rows. Every statement is
+ * `CREATE … IF NOT EXISTS`, which takes the write lock only to create an
+ * object that does not exist yet, so on a store that has them all it runs while
+ * another connection holds the lock.
+ */
+export function buildSchemaDdl(spec: SchemaSpec): string {
+  return [...specDdl(spec), SYNC_STATE_TABLE, SYNC_LEASE_TABLE].join('\n\n');
+}
+
+/** The `schema_version` table and the DDL `spec` declares: primary table, indexes, FTS. */
+function specDdl(spec: SchemaSpec): string[] {
   const { ftsColumns, tokenizer } = validateSchemaSpec(spec);
   const t = spec.table;
 
@@ -117,38 +176,7 @@ export function buildSchemaSql(spec: SchemaSpec): string {
     parts.push(buildFtsSql(t, ftsColumns, tokenizer));
   }
 
-  parts.push(
-    /**
-     * `mode` is last: a store created before it existed gains it on open by
-     * `ALTER TABLE … ADD COLUMN`, which appends, so both layouts match.
-     */
-    `CREATE TABLE IF NOT EXISTS mirror_sync_state (
-  id INTEGER PRIMARY KEY CHECK (id = 1),
-  status TEXT NOT NULL,
-  cursor TEXT,
-  checkpoint TEXT,
-  started_at TEXT,
-  completed_at TEXT,
-  total INTEGER,
-  error TEXT,
-  mode TEXT
-);`,
-    `INSERT OR IGNORE INTO mirror_sync_state(id, status) VALUES (1, 'pending');`,
-    /**
-     * The cross-process sync lease: unheld while `owner` is NULL; `expires_at`
-     * is epoch ms. A framework table, so an existing store gains it on its next
-     * open without a migration of the server's own.
-     */
-    `CREATE TABLE IF NOT EXISTS mirror_sync_lease (
-  id INTEGER PRIMARY KEY CHECK (id = 1),
-  owner TEXT,
-  generation INTEGER NOT NULL DEFAULT 0,
-  expires_at INTEGER
-);`,
-    `INSERT OR IGNORE INTO mirror_sync_lease(id, generation) VALUES (1, 0);`,
-  );
-
-  return parts.join('\n\n');
+  return parts;
 }
 
 /**
