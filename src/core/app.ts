@@ -35,7 +35,10 @@ import { ToolRegistry } from '@/mcp-server/tools/tool-registration.js';
 import type { InputHandlingOptions } from '@/mcp-server/tools/utils/arguments/index.js';
 import { getDisabledMetadata } from '@/mcp-server/tools/utils/disabled-tool.js';
 import { TransportManager } from '@/mcp-server/transports/manager.js';
-import { observeStdinEof } from '@/mcp-server/transports/stdio/stdioTransport.js';
+import {
+  observeStdinEof,
+  routeConsoleToStderr,
+} from '@/mcp-server/transports/stdio/stdioTransport.js';
 import {
   type FrameworkServerFactory,
   resolveSessionMode,
@@ -285,7 +288,10 @@ export interface CreateAppOptions<TSupabaseClient extends object = SupabaseClien
    * ```
    */
   sessionMode?: SessionMode | { default?: SessionMode; require?: 'stateful' };
-  /** Runs after core services are constructed, before transport starts. */
+  /**
+   * Runs after core services are constructed, before transport starts. Under
+   * the stdio transport, console output from it already goes to stderr.
+   */
   setup?: (core: CoreServices<TSupabaseClient>) => void | Promise<void>;
   /**
    * A folder of skill folders (each holding a `SKILL.md`) to serve over MCP
@@ -504,7 +510,8 @@ function assertSessionModeRequirement(
 /**
  * Constructs core services, registries, and server factory.
  * Shared by createApp() (Node) and createWorkerHandler() (Workers).
- * Does NOT start transport, register signal handlers, or init OTEL/logger.
+ * Does NOT start transport, route the console, register signal handlers, or
+ * init OTEL/logger.
  * @internal
  */
 export async function composeServices<TSupabaseClient extends object = SupabaseClientHandle>(
@@ -862,6 +869,11 @@ export async function createApp<TSupabaseClient extends object = SupabaseClientH
   let composed: ComposedApp<TSupabaseClient>;
   try {
     assertSupportedNodeVersion();
+    // stdout carries only JSON-RPC under stdio, so console output from core
+    // service startup and setup() goes to stderr as well. Reading the transport
+    // parses the config, so an invalid environment fails here, through the
+    // same banner.
+    if (config.mcpTransportType === 'stdio') routeConsoleToStderr();
     composed = await composeServices<TSupabaseClient>(options);
   } catch (err) {
     // Composition runs before the logger has sinks, so anything it logged —

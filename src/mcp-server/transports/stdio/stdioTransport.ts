@@ -16,8 +16,14 @@
  * @see {@link https://modelcontextprotocol.io/specification/2026-07-28/basic/transports | MCP Transports}
  * @module src/mcp-server/transports/stdioTransport
  */
+import { Console } from 'node:console';
+import { Writable } from 'node:stream';
 import type { McpServerFactory } from '@modelcontextprotocol/server';
-import { type StdioServerHandle, serveStdio } from '@modelcontextprotocol/server/stdio';
+import {
+  type StdioServerHandle,
+  StdioServerTransport,
+  serveStdio,
+} from '@modelcontextprotocol/server/stdio';
 
 import { ErrorHandler } from '@/utils/internal/error-handler/errorHandler.js';
 import { messageText } from '@/utils/internal/error-handler/helpers.js';
@@ -26,11 +32,118 @@ import { type RequestContext, withExtra } from '@/utils/internal/requestContext.
 import { logStartupBanner } from '@/utils/internal/startupBanner.js';
 
 /**
+ * The console methods the stderr `Console` takes over: all of a `Console`'s
+ * methods but `clear`, which prints nothing while stdout is not a terminal and
+ * would start clearing one on stderr. The stateful companions (`time`,
+ * `countReset`, `groupEnd`) move with the methods that print, so each timer,
+ * counter, and group lives on one console.
+ */
+const CONSOLE_METHODS = [
+  'assert',
+  'count',
+  'countReset',
+  'debug',
+  'dir',
+  'dirxml',
+  'error',
+  'group',
+  'groupCollapsed',
+  'groupEnd',
+  'info',
+  'log',
+  'table',
+  'time',
+  'timeEnd',
+  'timeLog',
+  'trace',
+  'warn',
+] as const satisfies readonly (keyof Console)[];
+
+/** Marks a console {@link routeConsoleToStderr} has already rebound. */
+const ROUTED_TO_STDERR = Symbol('routedToStderr');
+
+/**
+ * Rebinds the global console to a `Console` over stderr, for the life of the
+ * process. A swap restored after each call would reroute whatever other
+ * request's code ran inside the window, so nothing is ever put back.
+ *
+ * Runs once per console. Under stdio, `createApp` calls it before core
+ * services start and `setup()` runs, and {@link startStdioTransport} again
+ * before serving. The second call changes nothing: a counter, timer, or group
+ * started in between carries on, and a console method server code replaced in
+ * between stays replaced.
+ */
+export function routeConsoleToStderr(): void {
+  if (Object.hasOwn(console, ROUTED_TO_STDERR)) return;
+  const stderrConsole = new Console({ stdout: process.stderr, stderr: process.stderr });
+  Object.assign(
+    console,
+    Object.fromEntries(
+      CONSOLE_METHODS.map((method) => [method, stderrConsole[method].bind(stderrConsole)]),
+    ),
+  );
+  // Bun's `console.write(...data)` prints raw text and bytes to stdout.
+  if ('write' in console) {
+    Object.assign(console, {
+      write: (...data: Array<string | ArrayBufferView | ArrayBuffer>): number => {
+        let bytes = 0;
+        for (const chunk of data) {
+          // Bun's stderr takes each kind of chunk its `console.write` does.
+          process.stderr.write(chunk as string | Uint8Array);
+          bytes += typeof chunk === 'string' ? Buffer.byteLength(chunk) : chunk.byteLength;
+        }
+        return bytes;
+      },
+    });
+  }
+  // Configurable like the methods beside it, so restoring the console's own properties removes it too.
+  Object.defineProperty(console, ROUTED_TO_STDERR, { configurable: true, value: true });
+}
+
+/** U+2028 LINE SEPARATOR and U+2029 PARAGRAPH SEPARATOR, left raw by `JSON.stringify`. */
+const LINE_SEPARATOR = String.fromCodePoint(0x2028);
+const PARAGRAPH_SEPARATOR = String.fromCodePoint(0x2029);
+
+/**
+ * `process.stdout` as the transport writes to it: each chunk with U+2028 and
+ * U+2029 replaced by their JSON escapes, handed to stdout as it is sent. While
+ * stdout reports itself full, this stream holds what follows until stdout
+ * drains, and a stdout error destroys this stream with it, so the SDK's `drain`
+ * wait and error handling see stdout's own.
+ */
+function escapingStdout(): Writable {
+  const stdout = process.stdout;
+  const stream = new Writable({
+    decodeStrings: false,
+    write(chunk: string, _encoding, callback) {
+      const escaped = chunk
+        .replaceAll(LINE_SEPARATOR, '\\u2028')
+        .replaceAll(PARAGRAPH_SEPARATOR, '\\u2029');
+      if (stdout.write(escaped)) callback();
+      else stdout.once('drain', callback);
+    },
+  });
+  stdout.on('error', (error) => stream.destroy(error));
+  return stream;
+}
+
+/**
  * Serves MCP over this process's stdio from the supplied server factory.
  *
- * The SDK's `StdioServerTransport` reads newline-delimited JSON-RPC from stdin
- * and writes it to stdout, skipping non-JSON stdout lines rather than failing on
- * them. Logging via the `logger` utility goes to stderr, which the spec permits.
+ * stdout carries JSON-RPC messages and nothing else. Before serving, the
+ * console's methods are rebound to a `Console` over stderr for the life of the
+ * process ({@link routeConsoleToStderr}, which `createApp` has already run
+ * before `setup()`), so console output on this thread, a dependency's
+ * included, goes to stderr, which the spec permits; on Bun, so does
+ * `console.write`. Logging via the `logger` utility goes to stderr too.
+ * `process.stdout` itself is left alone, and the transport writes through it.
+ * Only the stdio transport rebinds the console: under HTTP it stays as it is.
+ *
+ * Each message is written as the SDK's `StdioServerTransport` serializes it,
+ * `JSON.stringify(message)` and a newline, with U+2028 and U+2029 written as
+ * their six-character JSON escapes. The JSON value is unchanged, and a client
+ * that splits lines with `node:readline`, which ends a line at either, still
+ * reads one line per message. Inbound lines that are not JSON are skipped.
  *
  * @param serverFactory - Produces the `McpServer` pinned to the connection.
  * @param parentContext - The logging and tracing context from the caller.
@@ -50,7 +163,9 @@ export function startStdioTransport(
   logger.info('Attempting to connect stdio transport...', operationContext);
 
   try {
+    routeConsoleToStderr();
     const handle = serveStdio(serverFactory, {
+      transport: new StdioServerTransport(process.stdin, escapingStdout()),
       // An inbound line failing the SDK's JSON-RPC schema arrives as its ZodError, written as its summary.
       onerror: (error) => {
         logger.debug(`Stdio transport reported: ${messageText(error)}`, operationContext);

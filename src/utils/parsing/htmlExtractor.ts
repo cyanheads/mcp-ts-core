@@ -85,6 +85,8 @@ export interface ExtractArticleOptions {
   /**
    * Enable Defuddle's debug logging and bypass div flattening. Useful when
    * diagnosing why a specific page extracts poorly. Defaults to `false`.
+   * Defuddle writes the log with `console.log`: to stdout, or to stderr on the
+   * stdio transport, which routes the process's console there.
    */
   debug?: boolean;
   /**

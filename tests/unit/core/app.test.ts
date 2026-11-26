@@ -20,6 +20,7 @@ const {
   mockRequestContextService,
   mockResetConfig,
   mockResourceRegistry,
+  mockRouteConsoleToStderr,
   mockSchedulerService,
   mockShutdownOpenTelemetry,
   mockToolRegistry,
@@ -182,6 +183,11 @@ const {
   const mockObserveStdinEof = vi.fn(
     (_options: { onEof: () => void }): (() => void) => mockStopWatchingStdin,
   );
+  /**
+   * Mocked for the same reason: the real one rebinds the test runner's own
+   * console. Its behavior is covered beside the watcher's, in that same file.
+   */
+  const mockRouteConsoleToStderr = vi.fn();
 
   return {
     mockConfig,
@@ -198,6 +204,7 @@ const {
     mockRequestContextService,
     mockResetConfig,
     mockResourceRegistry,
+    mockRouteConsoleToStderr,
     mockSchedulerService,
     mockShutdownOpenTelemetry,
     mockToolRegistry,
@@ -243,6 +250,7 @@ vi.mock('@/mcp-server/transports/manager.js', () => ({
 
 vi.mock('@/mcp-server/transports/stdio/stdioTransport.js', () => ({
   observeStdinEof: mockObserveStdinEof,
+  routeConsoleToStderr: mockRouteConsoleToStderr,
 }));
 
 vi.mock('@/services/canvas/core/canvasFactory.js', () => ({
@@ -1065,6 +1073,51 @@ describe('core/app', () => {
     expect(process.env.FORCE_COLOR).toBe('0');
 
     await handle.shutdown();
+  });
+
+  describe('console routing', () => {
+    it('routes the console to stderr under stdio before any core service or setup() runs', async () => {
+      const order: string[] = [];
+      mockRouteConsoleToStderr.mockImplementationOnce(() => {
+        order.push('console routed');
+      });
+      mockCreateStorageProvider.mockImplementationOnce(() => {
+        order.push('storage constructed');
+        return { provider: 'storage-provider' };
+      });
+
+      const handle = await createApp({
+        setup() {
+          order.push('setup');
+        },
+      });
+
+      expect(mockRouteConsoleToStderr).toHaveBeenCalledOnce();
+      expect(order).toEqual(['console routed', 'storage constructed', 'setup']);
+      await handle.shutdown();
+    });
+
+    it('leaves the console alone under http', async () => {
+      process.env.MCP_TRANSPORT_TYPE = 'http';
+      mockConfig.mcpTransportType = 'http';
+      const setup = vi.fn();
+
+      const handle = await createApp({ setup });
+
+      expect(setup).toHaveBeenCalledOnce();
+      expect(mockRouteConsoleToStderr).not.toHaveBeenCalled();
+      await handle.shutdown();
+    });
+
+    it('leaves the console alone in composeServices, which createWorkerHandler shares', async () => {
+      // A Worker's config reads `stdio` when nothing sets the transport, and it has no stdout to keep clean.
+      const setup = vi.fn();
+
+      await composeServices({ setup });
+
+      expect(setup).toHaveBeenCalledOnce();
+      expect(mockRouteConsoleToStderr).not.toHaveBeenCalled();
+    });
   });
 
   it('prints a startup config error banner and exits when composeServices throws a ConfigurationError (DEBUG unset)', async () => {

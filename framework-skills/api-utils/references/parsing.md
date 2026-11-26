@@ -239,7 +239,7 @@ interface ExtractArticleOptions {
   removeImages?: boolean;        // default false
   language?: string;             // preferred BCP 47 language
   useAsync?: boolean;            // default false; true lets Defuddle fetch from third-party APIs when the HTML holds no content
-  debug?: boolean;               // Defuddle debug logging, no div flattening
+  debug?: boolean;               // Defuddle debug log, written with console.log; no div flattening
   maxBytes?: number;             // UTF-8 input budget; unbounded when omitted
 }
 
@@ -255,6 +255,8 @@ interface ExtractArticleResult {
 ```
 
 **Cost.** The extraction runs synchronously on the calling thread and blocks the event loop until it finishes. It takes no abort signal and cannot be interrupted once it starts, and `maxBytes` bounds the input's size, not the CPU time spent on it. A server that extracts untrusted HTML should run `htmlExtractor` off its serving thread, in a worker thread or a child process, so one request cannot stall every other request on the process.
+
+**Console output.** Defuddle writes its `debug` log with `console.log`. On the stdio transport the framework routes the process's console to stderr, so nothing it prints reaches the JSON-RPC stream on stdout. A worker thread or child process has a console of its own: start the worker with `stdout: true` and pipe `worker.stdout` to `process.stderr`, and never let a child process inherit the server's stdout.
 
 HTML that is empty after trimming rejects with `ValidationError` (`parser_input_empty`), a Defuddle failure with `ValidationError` (`html_extract_failed`), and a missing peer with `ConfigurationError`.
 
