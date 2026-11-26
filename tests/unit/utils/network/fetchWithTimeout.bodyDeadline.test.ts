@@ -292,24 +292,73 @@ describe('fetchWithTimeout body deadline (issue #341)', () => {
   });
 
   it('classifies a caller deadline that fires mid-body as Timeout, not a cancellation', async () => {
-    const response = await fetchWithTimeout(`${origin}/stall`, 30_000, context, {
-      signal: AbortSignal.timeout(DEADLINE_MS),
-    });
+    const signal = AbortSignal.timeout(DEADLINE_MS);
+    const response = await fetchWithTimeout(`${origin}/stall`, 30_000, context, { signal });
 
-    await expect(response.text()).rejects.toMatchObject({
+    const failure = await response.text().catch((e: unknown) => e);
+
+    // The runtimes word the reason differently, so it is read off the fired signal.
+    const message = `fetch GET ${origin}/…: ${(signal.reason as Error).message}`;
+    expect(failure).toMatchObject({
       code: JsonRpcErrorCode.Timeout,
+      message,
       data: { errorSource: 'FetchSignalTimeout' },
     });
+    expect(messagesAt('info')).toContain(message);
+    expect(messagesAt('error')).toEqual([]);
   });
 
-  it('reports the timeout once, from the body read', async () => {
+  it('reports the timeout once, from the body read, at info', async () => {
     const response = await fetchWithTimeout(`${origin}/stall`, DEADLINE_MS, context);
     await response.text().catch(() => undefined);
 
-    const timeoutLogs = vi
-      .mocked(logger.error)
-      .mock.calls.filter(([message]) => String(message).includes('timed out'));
-    expect(timeoutLogs).toHaveLength(1);
+    expect(messagesAt('info').filter((message) => message.includes('timed out'))).toEqual([
+      `fetch GET ${origin}/… timed out after ${DEADLINE_MS}ms.`,
+    ]);
+    expect(messagesAt('error')).toEqual([]);
+  });
+});
+
+/**
+ * A caller that cancels a 2xx body it no longer needs ends the exchange on its
+ * own terms: the read pending at that moment resolves done, the deadline is
+ * disarmed, and nothing is recorded, at any level.
+ */
+describe('a 2xx body cancelled mid-read (#854)', () => {
+  const LEVELS = ['debug', 'info', 'notice', 'warning', 'error', 'crit', 'alert', 'emerg'] as const;
+
+  beforeEach(() => {
+    for (const level of ['notice', 'warning', 'crit', 'alert', 'emerg'] as const) {
+      vi.spyOn(logger, level).mockImplementation(() => {});
+    }
+  });
+
+  /** Every record's message, whatever its level. */
+  function everyMessage(): string[] {
+    return LEVELS.flatMap((level) =>
+      vi.mocked(logger[level]).mock.calls.map(([message]) => String(message)),
+    );
+  }
+
+  it('resolves the pending read done, disarms the deadline, and writes no record', async () => {
+    const deadline = trackDeadlineTimer(DEADLINE_MS);
+    const response = await fetchWithTimeout(`${origin}/stall`, DEADLINE_MS, context);
+    const reader = (response.body as ReadableStream<Uint8Array>).getReader();
+    await reader.read();
+    const pending = reader.read();
+    // One macrotask: the passthrough is now waiting on a chunk the peer never sends.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    await reader.cancel('caller is done');
+
+    await expect(pending).resolves.toEqual({ done: true, value: undefined });
+    // A cleared deadline timer cannot fire later, so no record can follow.
+    expect(deadline.cleared().length).toBeGreaterThan(0);
+    // One macrotask: a source read settling after the cancel has run its course.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(
+      everyMessage().filter((m) => m.startsWith('Network error') || m.includes('timed out')),
+    ).toEqual([]);
   });
 });
 
@@ -344,7 +393,7 @@ describe('a non-2xx body capture cut short (#604)', () => {
     expect(fetchFailedRecords()).toEqual([]);
   });
 
-  it("reports a caller deadline that cuts a 503 capture as Timeout on the caller's signal", async () => {
+  it("reports a caller deadline that cuts a 503 capture as Timeout carrying the deadline's reason", async () => {
     const caller = new AbortController();
     // The reason `AbortSignal.timeout()` aborts with, landed on an event instead of a clock.
     onHeaders(() => caller.abort(new DOMException('The operation timed out.', 'TimeoutError')));
@@ -356,15 +405,18 @@ describe('a non-2xx body capture cut short (#604)', () => {
       { signal: caller.signal },
     ).catch((e: unknown) => e);
 
+    const message = `fetch GET ${origin}/…: The operation timed out.`;
     expect(error).toBeInstanceOf(McpError);
     expect((error as McpError).code).toBe(JsonRpcErrorCode.Timeout);
+    expect((error as McpError).message).toBe(message);
     expect((error as McpError).data).toEqual({ errorSource: 'FetchSignalTimeout' });
-    expect(logger.error).toHaveBeenCalledWith(
-      `fetch GET ${origin}/… timed out on the caller's signal.`,
+    expect(logger.info).toHaveBeenCalledWith(
+      message,
       expect.objectContaining({
         extra: expect.objectContaining({ errorSource: 'FetchSignalTimeout' }),
       }),
     );
+    expect(messagesAt('error')).toEqual([]);
     expect(fetchFailedRecords()).toEqual([]);
   });
 
@@ -396,7 +448,9 @@ describe('a non-2xx body capture cut short (#604)', () => {
       ...serverOnlyFields(['body', 'responseBody']),
     });
     expect(fetchFailedRecords()).toEqual([`Fetch failed for ${origin}/… with status ${status}.`]);
-    expect(messagesAt('error').filter((m) => m.includes('timed out'))).toEqual([]);
+    expect(
+      [...messagesAt('error'), ...messagesAt('info')].filter((m) => m.includes('timed out')),
+    ).toEqual([]);
   });
 
   it('logs an expected status at debug when timeoutMs cut its capture', async () => {
@@ -500,8 +554,10 @@ describe('a 2xx body that fails mid-stream (#819)', () => {
       expect(cause).toMatchObject({ name: raw.name, message: raw.message });
       expect(codesOf(cause)).toEqual(codesOf(raw));
 
+      // At info: the caller decides whether the failure matters (#864).
+      expect(messagesAt('error')).toEqual([]);
       const records = vi
-        .mocked(logger.error)
+        .mocked(logger.info)
         .mock.calls.filter(([recorded]) => String(recorded).startsWith('Network error'));
       expect(records).toHaveLength(1);
       const [recorded, recordContext] = records[0] ?? [];

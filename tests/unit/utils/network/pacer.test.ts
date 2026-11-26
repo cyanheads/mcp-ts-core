@@ -471,6 +471,302 @@ describe('createPacer', () => {
   });
 
   // -----------------------------------------------------------------------
+  // A cooldown that moves the gate past a queued caller's budget (#892)
+  // -----------------------------------------------------------------------
+
+  /**
+   * Records when, on the suite's fake clock, and with what a call is rejected,
+   * so a test can tell a shed at the 429 from one at the caller's own budget.
+   */
+  function noteRejection(promise: Promise<unknown>): { at?: number; error?: McpError } {
+    const rejection: { at?: number; error?: McpError } = {};
+    void promise.catch((e: unknown) => {
+      rejection.at = Date.now() - origin;
+      rejection.error = e as McpError;
+    });
+    return rejection;
+  }
+
+  /** A task that answers with an upstream rate limit after `ms`. */
+  const rateLimitedAfter = (ms: number, retryAfter?: string) => () =>
+    new Promise<never>((_resolve, reject) => setTimeout(() => reject(rateLimit(retryAfter)), ms));
+
+  it('sheds a caller queued before a 429 as wait_projected when the gate closes past its maxWaitMs', async () => {
+    const pacer = createPacer({
+      name: 'swept',
+      minStartGapMs: 200,
+      cooldown: { baseMs: 10_000, maxMs: 60_000 },
+    });
+    const never = vi.fn(async () => 'never');
+
+    const limited = pacer
+      .run(async () => {
+        throw rateLimit('30');
+      })
+      .catch((e: unknown) => e);
+    // Queued behind the start gap: 200 ms out, inside its 3s budget.
+    const queued = noteRejection(pacer.run(never, { maxWaitMs: 3000 }));
+
+    await limited;
+    await vi.advanceTimersByTimeAsync(0);
+    // Shed with the 429, not 3s later: the gate opens 30s out.
+    expect(queued.at).toBe(0);
+    expect(queued.error?.message).toBe(
+      "No swept request slot available within the caller's wait budget.",
+    );
+    expect(queued.error?.data).toEqual({
+      reason: 'pacer_shed',
+      shedKind: 'wait_projected',
+      retryAfter: 30,
+      queueDepth: 0,
+    });
+    expect(never).not.toHaveBeenCalled();
+    expect(addsFor('mcp.pacer.sheds', 'swept')).toHaveLength(1);
+    expect(
+      addsFor('mcp.pacer.queue_depth', 'swept').reduce((depth, add) => depth + add.value, 0),
+    ).toBe(0);
+    // Its shed timer and the dispatch timer went with it.
+    expect(vi.getTimerCount()).toBe(0);
+
+    // An arrival after the 429 is shed on enqueue, as before.
+    await vi.advanceTimersByTimeAsync(100);
+    const late = (await pacer.run(never, { maxWaitMs: 3000 }).catch((e: unknown) => e)) as McpError;
+    expect(late.data).toEqual({
+      reason: 'pacer_shed',
+      shedKind: 'wait_projected',
+      retryAfter: 30,
+      queueDepth: 0,
+    });
+    expect(never).not.toHaveBeenCalled();
+  });
+
+  it('keeps a waiter with no maxWaitMs and one whose budget still fits, shedding those past their budgets', async () => {
+    const pacer = createPacer({
+      name: 'swept-mixed',
+      minStartGapMs: 200,
+      cooldown: { baseMs: 1000, maxMs: 60_000 },
+    });
+    const { startedAt, task } = makeRecorder(() => origin);
+
+    const limited = pacer
+      .run(async () => {
+        throw rateLimit('2');
+      })
+      .catch((e: unknown) => e);
+    const unbounded = pacer.run(task('unbounded'));
+    const fits = pacer.run(task('fits'), { maxWaitMs: 3000 });
+    const tooShort = noteRejection(pacer.run(task('too-short'), { maxWaitMs: 1000 }));
+    const alsoShort = noteRejection(pacer.run(task('also-short'), { maxWaitMs: 1500 }));
+
+    await limited;
+    await vi.advanceTimersByTimeAsync(0);
+    // Both leave the line before either is sized, so each sees the same queue:
+    // behind the two kept waiters (2s and 2.2s), a returning caller starts at 2.4s.
+    for (const shed of [tooShort, alsoShort]) {
+      expect(shed.at).toBe(0);
+      expect(shed.error?.data).toEqual({
+        reason: 'pacer_shed',
+        shedKind: 'wait_projected',
+        retryAfter: 3,
+        queueDepth: 2,
+      });
+    }
+    expect(addsFor('mcp.pacer.sheds', 'swept-mixed')).toHaveLength(2);
+
+    await vi.advanceTimersByTimeAsync(2200);
+    await expect(Promise.all([unbounded, fits])).resolves.toEqual(['unbounded', 'fits']);
+    expect(startedAt).toEqual([2000, 2200]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('keeps a waiter whose start, the gate plus its place in line, lands on its deadline, and sheds one a millisecond short', async () => {
+    const pacer = createPacer({
+      name: 'swept-edge',
+      minStartGapMs: 500,
+      cooldown: { baseMs: 5000, maxMs: 60_000 },
+    });
+    const { startedAt, task } = makeRecorder(() => origin);
+
+    const limited = pacer
+      .run(async () => {
+        throw rateLimit();
+      })
+      .catch((e: unknown) => e);
+    // No budget and no signal, so it keeps its place and is first through the gate at 5s.
+    const head = pacer.run(task('head'));
+    // Each can start 500 ms behind `head` at the earliest.
+    const short = noteRejection(pacer.run(task('short'), { maxWaitMs: 5499 }));
+    const exact = pacer.run(task('exact'), { maxWaitMs: 5500 });
+
+    await limited;
+    await vi.advanceTimersByTimeAsync(0);
+    expect(short.at).toBe(0);
+    // A returning caller joins behind `head` (5s) and `exact` (5.5s): 6s.
+    expect(short.error?.data).toEqual({
+      reason: 'pacer_shed',
+      shedKind: 'wait_projected',
+      retryAfter: 6,
+      queueDepth: 2,
+    });
+
+    // `exact` is not pushed behind the waiter shed ahead of it.
+    await vi.advanceTimersByTimeAsync(5500);
+    await expect(Promise.all([head, exact])).resolves.toEqual(['head', 'exact']);
+    expect(startedAt).toEqual([5000, 5500]);
+    expect(addsFor('mcp.pacer.sheds', 'swept-edge')).toHaveLength(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('keeps a waiter whose budget fits the gate behind one that may still abort, and starts it in time when that one does', async () => {
+    const pacer = createPacer({
+      name: 'swept-abort',
+      minStartGapMs: 1000,
+      cooldown: { baseMs: 5000, maxMs: 60_000 },
+    });
+    const { startedAt, task } = makeRecorder(() => origin);
+    const controller = new AbortController();
+    const reason = new Error('caller went away');
+
+    const limited = pacer
+      .run(async () => {
+        throw rateLimit();
+      })
+      .catch((e: unknown) => e);
+    const cancellable = pacer.run(task('cancellable'), { signal: controller.signal });
+    // The 5s gate alone fits its budget; behind `cancellable` it would start at 6s.
+    const budgeted = pacer.run(task('budgeted'), { maxWaitMs: 5500 });
+
+    await limited;
+    await vi.advanceTimersByTimeAsync(1000);
+    controller.abort(reason);
+    await expect(cancellable).rejects.toBe(reason);
+
+    await vi.advanceTimersByTimeAsync(4000);
+    await expect(budgeted).resolves.toBe('budgeted');
+    expect(startedAt).toEqual([5000]);
+    expect(addsFor('mcp.pacer.sheds', 'swept-abort')).toEqual([]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('sweeps on each gate move, so a waiter ahead that a later 429 sheds frees its place in time', async () => {
+    const pacer = createPacer({
+      name: 'swept-twice',
+      maxConcurrent: 2,
+      minStartGapMs: 500,
+      cooldown: { baseMs: 1000, maxMs: 60_000 },
+    });
+    const { startedAt, task } = makeRecorder(() => origin);
+
+    // They start at 0 and 500 ms (the gap) and answer 429 at 2s, closing the
+    // gate to 7s, and at 3.3s, moving it to 7.3s.
+    const first = pacer.run(rateLimitedAfter(2000, '5')).catch((e: unknown) => e);
+    const second = pacer.run(rateLimitedAfter(2800, '4')).catch((e: unknown) => e);
+    const ahead = noteRejection(pacer.run(task('ahead'), { maxWaitMs: 7200 }));
+    const behind = pacer.run(task('behind'), { maxWaitMs: 7400 });
+
+    await vi.advanceTimersByTimeAsync(3300);
+    // The 7s gate fit `ahead`; the 7.3s one does not, so it goes at the second 429.
+    expect(ahead.at).toBe(3300);
+    expect(ahead.error?.data).toEqual({
+      reason: 'pacer_shed',
+      shedKind: 'wait_projected',
+      retryAfter: 5,
+      queueDepth: 1,
+    });
+
+    // Counted behind `ahead` at the first 429, `behind` would have projected to
+    // 7.5s, past its 7.4s budget, though it starts as the gate reopens.
+    await vi.advanceTimersByTimeAsync(4000);
+    await expect(behind).resolves.toBe('behind');
+    expect(startedAt).toEqual([7300]);
+    await Promise.all([first, second]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('keeps a waiter a held concurrency slot may delay: the projection cannot see the slot free', async () => {
+    const pacer = createPacer({
+      name: 'swept-conc',
+      maxConcurrent: 2,
+      cooldown: { baseMs: 5000, maxMs: 60_000 },
+    });
+    const { startedAt, task } = makeRecorder(() => origin);
+
+    const long = pacer.run(holdFor(5500));
+    const limited = pacer
+      .run(async () => {
+        throw rateLimit();
+      })
+      .catch((e: unknown) => e);
+    // `head` takes the slot the 429 freed when the gate reopens at 5s and holds
+    // it; `budgeted` waits on `long`.
+    const head = pacer.run(task('head', holdFor(1000, 'head')));
+    const budgeted = pacer.run(task('budgeted'), { maxWaitMs: 6000 });
+
+    await limited;
+    await vi.advanceTimersByTimeAsync(5500);
+    // `long` frees the second slot at 5.5s, inside the 6s budget.
+    expect(startedAt).toEqual([5000, 5500]);
+    await vi.advanceTimersByTimeAsync(500);
+    await expect(Promise.all([long, head, budgeted])).resolves.toEqual([
+      'held',
+      'head',
+      'budgeted',
+    ]);
+    expect(addsFor('mcp.pacer.sheds', 'swept-conc')).toEqual([]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("sizes a cooldown shed's retryAfter to the gate, the rate-limited task's slot already released", async () => {
+    const pacer = serial({ baseMs: 1000, maxMs: 60_000 });
+
+    const limited = pacer.run(rateLimitedAfter(10_000)).catch((e: unknown) => e);
+    // Admitted at 0: nothing projects when a concurrency slot frees.
+    const queued = noteRejection(pacer.run(async () => 'never', { maxWaitMs: 10_500 }));
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    await limited;
+    expect(queued.at).toBe(10_000);
+    // The gate reopens 1s out and the only slot is free. Floored at the 10s this
+    // caller waited, as if the slot were still held, it would read 10.
+    expect(queued.error?.data).toEqual({
+      reason: 'pacer_shed',
+      shedKind: 'wait_projected',
+      retryAfter: 1,
+      queueDepth: 0,
+    });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('sheds no waiter on a rate limit that closes the gate for no time, leaving a slow slot to the budget timer', async () => {
+    // `baseMs: 0` with no Retry-After closes the gate for no time: it reopens as it closes.
+    const pacer = createPacer({
+      name: 'swept-zero',
+      maxConcurrent: 1,
+      minStartGapMs: 1000,
+      cooldown: { baseMs: 0, maxMs: 60_000 },
+    });
+
+    const long = pacer.run(holdFor(2500));
+    const limited = pacer.run(rateLimitedAfter(100)).catch((e: unknown) => e);
+    // Projected to 2s at enqueue; `long` holding the only slot to 2.5s puts it at 3.5s.
+    const queued = noteRejection(pacer.run(async () => 'never', { maxWaitMs: 3000 }));
+
+    await vi.advanceTimersByTimeAsync(2600);
+    await Promise.all([long, limited]);
+    expect(queued.at).toBeUndefined();
+
+    await vi.advanceTimersByTimeAsync(400);
+    expect(queued.at).toBe(3000);
+    expect(queued.error?.data).toEqual({
+      reason: 'pacer_shed',
+      shedKind: 'wait_elapsed',
+      retryAfter: 1,
+      queueDepth: 0,
+    });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  // -----------------------------------------------------------------------
   // maxQueueDepth bounds waiters, not arrivals
   // -----------------------------------------------------------------------
 
@@ -873,7 +1169,7 @@ describe('createPacer', () => {
     expect(startedAt).toEqual([0, 1000, 1000, 3000]);
   });
 
-  it('sheds a still-queued entry behind a closed gate with retryAfter covering the gate', async () => {
+  it('sheds a queued entry as the gate closes past its maxWaitMs, with retryAfter covering the gate', async () => {
     const pacer = serial({ baseMs: 5000, maxMs: 60_000 });
 
     const limited = pacer
@@ -882,24 +1178,23 @@ describe('createPacer', () => {
       })
       .catch((e: unknown) => e);
     // Admitted: the gate was still open when it enqueued.
-    const queued = pacer.run(async () => 'never', { maxWaitMs: 2000 }).catch((e: unknown) => e);
+    const queued = noteRejection(pacer.run(async () => 'never', { maxWaitMs: 2000 }));
 
     await vi.advanceTimersByTimeAsync(0);
     await limited;
-    await vi.advanceTimersByTimeAsync(2000);
 
-    const error = (await queued) as McpError;
-    expect(error.message).toBe(
-      "The caller's wait budget ran out before a cool request slot opened.",
+    // The gate reopens at 5s, past the 2s budget, so the caller is not held to it.
+    expect(queued.at).toBe(0);
+    expect(queued.error?.message).toBe(
+      "No cool request slot available within the caller's wait budget.",
     );
-    // The gate reopens at 5s, 3s after the shed.
-    expect(error.data).toEqual({
+    expect(queued.error?.data).toEqual({
       reason: 'pacer_shed',
-      shedKind: 'wait_elapsed',
-      retryAfter: 3,
+      shedKind: 'wait_projected',
+      retryAfter: 5,
       queueDepth: 0,
     });
-    expect(error.data?.retryAfter).toBe(Math.ceil(pacer.cooldown.remainingMs / 1000));
+    expect(queued.error?.data?.retryAfter).toBe(Math.ceil(pacer.cooldown.remainingMs / 1000));
     expect(vi.getTimerCount()).toBe(0);
   });
 

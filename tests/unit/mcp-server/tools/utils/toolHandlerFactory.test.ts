@@ -4907,6 +4907,9 @@ describe('createToolHandler', () => {
      * Timeout, the caller withdrawing the request is a cancellation.
      */
     describe('fetchWithTimeout under a request signal composed with a deadline', () => {
+      /** The composed signal the last run handed to `fetchWithTimeout`. */
+      let composedSignal: AbortSignal | undefined;
+
       async function runDeadlineFetch(
         name: string,
         requestSignal: AbortSignal,
@@ -4924,8 +4927,9 @@ describe('createToolHandler', () => {
           input: z.object({}),
           output: z.object({ ok: z.boolean().describe('Never returned.') }),
           handler: async (_input, ctx) => {
+            composedSignal = AbortSignal.any([ctx.signal, AbortSignal.timeout(deadlineMs)]);
             await fetchWithTimeout('https://upstream.example.com/data', 30_000, ctx, {
-              signal: AbortSignal.any([ctx.signal, AbortSignal.timeout(deadlineMs)]),
+              signal: composedSignal,
             });
             return { ok: true };
           },
@@ -4943,11 +4947,15 @@ describe('createToolHandler', () => {
 
         const result = await runDeadlineFetch('deadline_fetch_tool', request.signal, 10);
 
+        // The text the agent reads carries the deadline's own reason and names no caller (#878).
+        const reason = composedSignal?.reason as Error | undefined;
+        const message = `fetch GET https://upstream.example.com/…: ${reason?.message}`;
+        expect(reason).toBeInstanceOf(Error);
         expect(request.signal.aborted).toBe(false);
         expect(envelope(result).code).toBe(JsonRpcErrorCode.Timeout);
-        expect(firstBlock(result)).toMatchObject({
-          text: expect.stringContaining("timed out on the caller's signal"),
-        });
+        expect(envelope(result).message).toBe(message);
+        expect(firstBlock(result)).toMatchObject({ text: expect.stringContaining(message) });
+        expect(JSON.stringify(result)).not.toContain("caller's signal");
       });
 
       it('reports the request being cancelled as RequestCancelled', async () => {

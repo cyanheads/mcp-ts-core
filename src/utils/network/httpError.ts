@@ -17,13 +17,17 @@ import { readBoundedResponseText } from '@/utils/network/responseBody.js';
  * Returns `undefined` when the status is in the 1xx/2xx range — those are not
  * errors and the caller should not be invoking error mapping on them.
  *
- * A 3xx does reach error mapping whenever it is not followed: under
- * `redirect: 'manual'` the caller gets the redirect back rather than the followed
- * response, a 304 comes back under every redirect mode, and any other 3xx with no
- * `Location` comes back under `follow` too (`redirect: 'error'` rejects it as a
- * network error); `!response.ok` then throws. It maps like an unlisted 4xx — the
- * request as sent cannot be served at this URL — which also keeps it out of
- * `withRetry`'s transient set, since re-issuing it returns the same redirect.
+ * A 3xx does reach error mapping whenever it is not followed, and `!response.ok`
+ * then throws. From a native `fetch`: under `redirect: 'manual'` the caller gets
+ * the redirect back rather than the followed response, a 300 or 304 comes back
+ * under every redirect mode, and a 301, 302, 303, 307, or 308 with no `Location`
+ * comes back under `follow` too (`redirect: 'error'` rejects one as a network
+ * error). `fetchWithTimeout` follows redirects itself and hands a 3xx on in every
+ * mode when it has no `Location` or answers a stream body with anything but a
+ * 303; without `rejectPrivateIPs`, also under `manual` and `error` alike, and for
+ * a status native following leaves alone (a 300, a 304). It maps like an unlisted
+ * 4xx — the request as sent cannot be served at this URL — which also keeps it
+ * out of `withRetry`'s transient set, since re-issuing it returns the same redirect.
  *
  * | Status | Code |
  * |:-------|:-----|

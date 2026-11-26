@@ -56,7 +56,10 @@ describe('fetchWithTimeout', () => {
     timestamp: new Date().toISOString(),
   };
   let debugSpy: MockInstance;
+  let infoSpy: MockInstance;
   let errorSpy: MockInstance;
+  /** Every level at or above `warning`, `error` included. */
+  let atWarningOrAbove: MockInstance[];
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -66,8 +69,20 @@ describe('fetchWithTimeout', () => {
     dnsSlots.resolve6 = vi.fn().mockRejectedValue(unresolvable());
     dnsSlots.lookup = vi.fn().mockRejectedValue(unresolvable());
     debugSpy = vi.spyOn(logger, 'debug').mockImplementation(() => {});
+    infoSpy = vi.spyOn(logger, 'info').mockImplementation(() => {});
     errorSpy = vi.spyOn(logger, 'error').mockImplementation(() => {});
+    atWarningOrAbove = [
+      vi.spyOn(logger, 'warning').mockImplementation(() => {}),
+      errorSpy,
+      vi.spyOn(logger, 'crit').mockImplementation(() => {}),
+      vi.spyOn(logger, 'alert').mockImplementation(() => {}),
+      vi.spyOn(logger, 'emerg').mockImplementation(() => {}),
+    ];
   });
+
+  function expectNoRecordAtWarningOrAbove() {
+    for (const spy of atWarningOrAbove) expect(spy).not.toHaveBeenCalled();
+  }
 
   afterEach(() => {
     vi.restoreAllMocks();
@@ -254,13 +269,57 @@ describe('fetchWithTimeout', () => {
 
     await expect(fetchWithTimeout('https://slow.example.com', 5, context)).rejects.toMatchObject({
       code: JsonRpcErrorCode.Timeout,
-      data: expect.objectContaining({ errorSource: 'FetchTimeout' }),
+      message: 'fetch GET https://slow.example.com timed out.',
+      data: { errorSource: 'FetchTimeout' },
     });
 
-    expect(errorSpy).toHaveBeenCalledWith(
+    // The caller decides whether a timeout is a failure; the helper records it at info (#864).
+    expect(infoSpy).toHaveBeenCalledWith(
       'fetch GET https://slow.example.com timed out after 5ms.',
       expect.objectContaining({ extra: expect.objectContaining({ errorSource: 'FetchTimeout' }) }),
     );
+    expectNoRecordAtWarningOrAbove();
+  });
+
+  /**
+   * A timeout or a network failure is the caller's to judge: retried into a
+   * success, or caught and handled, it leaves nothing at warning or above (#864).
+   */
+  describe('a failure withRetry retries into a success (#864)', () => {
+    it.each<[string, (signal: AbortSignal) => Promise<Response>]>([
+      [
+        'a timeout',
+        (signal) =>
+          new Promise((_resolve, reject) => {
+            signal.addEventListener('abort', () => reject(signal.reason));
+          }),
+      ],
+      [
+        'a network failure',
+        async () => {
+          throw Object.assign(new TypeError('socket hang up'), { code: 'ECONNRESET' });
+        },
+      ],
+    ])('leaves nothing at warning or above after %s', async (_label, firstAttempt) => {
+      const fetchMock = vi
+        .spyOn(globalThis, 'fetch')
+        .mockImplementationOnce((_url, init) => firstAttempt(init?.signal as AbortSignal))
+        .mockResolvedValueOnce(new Response('ok', { status: 200 }));
+
+      const response = await withRetry(
+        () => fetchWithTimeout('https://api.example.com/x', 20, context),
+        { maxRetries: 1, baseDelayMs: 1, jitter: 0, context },
+      );
+
+      expect(await response.text()).toBe('ok');
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      // The first attempt's record is still written, below warning.
+      expect(infoSpy).toHaveBeenCalledWith(
+        expect.stringMatching(/timed out after 20ms\.$|^Network error during fetch GET /),
+        expect.anything(),
+      );
+      expectNoRecordAtWarningOrAbove();
+    });
   });
 
   it('wraps unknown fetch errors into an McpError', async () => {
@@ -276,7 +335,7 @@ describe('fetchWithTimeout', () => {
       }),
     });
 
-    expect(errorSpy).toHaveBeenCalledWith(
+    expect(infoSpy).toHaveBeenCalledWith(
       'Network error during fetch GET https://error.example.com: connection reset',
       expect.objectContaining({
         extra: expect.objectContaining({
@@ -285,6 +344,7 @@ describe('fetchWithTimeout', () => {
         }),
       }),
     );
+    expectNoRecordAtWarningOrAbove();
   });
 
   it('rethrows an existing McpError without wrapping it again', async () => {
@@ -295,7 +355,7 @@ describe('fetchWithTimeout', () => {
       existingError,
     );
 
-    expect(errorSpy).toHaveBeenCalledWith(
+    expect(infoSpy).toHaveBeenCalledWith(
       'Network error during fetch GET https://error.example.com: upstream unavailable',
       expect.objectContaining({
         extra: expect.objectContaining({
@@ -379,7 +439,7 @@ describe('fetchWithTimeout', () => {
       }),
     });
 
-    expect(errorSpy).toHaveBeenCalledWith(
+    expect(infoSpy).toHaveBeenCalledWith(
       'Network error during fetch GET https://string-error.example.com: catastrophic failure',
       expect.objectContaining({
         extra: expect.objectContaining({
@@ -433,57 +493,134 @@ describe('fetchWithTimeout', () => {
       );
     }
 
-    it('reports a TimeoutError abort reason as Timeout, distinct from the helper’s own timeout', async () => {
-      const infoSpy = vi.spyOn(logger, 'info').mockImplementation(() => {});
+    /** The deadline a server puts on its own upstream calls, named in its own words. */
+    const BUDGET = 'Upstream requests for this call ran past the 50 s budget.';
+
+    /** Aborts a fetch in flight with `reason` and returns what it threw. */
+    async function abortWith(reason: unknown): Promise<McpError> {
       hangUntilAborted();
-      const externalController = new AbortController();
-
-      const promise = fetchWithTimeout('https://example.com', 30_000, context, {
-        signal: externalController.signal,
+      const caller = new AbortController();
+      const promise = fetchWithTimeout('https://api.example.com/search?q=1', 30_000, context, {
+        signal: caller.signal,
       });
+      caller.abort(reason);
+      return (await promise.catch((e: unknown) => e)) as McpError;
+    }
 
+    /** The `FetchSignalTimeout` record, which shares its text with the throw. */
+    function signalTimeoutRecords(): string[] {
+      return [...infoSpy.mock.calls, ...errorSpy.mock.calls]
+        .filter(
+          ([, recordContext]) =>
+            (recordContext as { extra?: { errorSource?: unknown } } | undefined)?.extra
+              ?.errorSource === 'FetchSignalTimeout',
+        )
+        .map(([message]) => String(message));
+    }
+
+    it('reports a TimeoutError abort reason as Timeout, distinct from the helper’s own timeout', async () => {
       // The caller's own deadline — not this helper's `timeoutMs`, so it keeps
       // an errorSource of its own rather than the internal FetchTimeout.
-      externalController.abort(new DOMException('caller deadline', 'TimeoutError'));
+      const error = await abortWith(new DOMException(BUDGET, 'TimeoutError'));
 
-      const error = (await promise.catch((e: unknown) => e)) as McpError;
+      const message = `fetch GET https://api.example.com/…?…: ${BUDGET}`;
       expect(error).toBeInstanceOf(McpError);
       expect(error.code).toBe(JsonRpcErrorCode.Timeout);
+      expect(error.message).toBe(message);
       expect(error.data).toEqual({ errorSource: 'FetchSignalTimeout' });
-      expect(errorSpy).toHaveBeenCalledWith(
-        expect.stringContaining("timed out on the caller's signal"),
+      // One message for the record and the throw, at info (#864, #878).
+      expect(infoSpy).toHaveBeenCalledWith(
+        message,
         expect.objectContaining({
           extra: expect.objectContaining({ errorSource: 'FetchSignalTimeout' }),
         }),
       );
+      expect(signalTimeoutRecords()).toEqual([message]);
       expect(infoSpy).not.toHaveBeenCalledWith(
         expect.stringContaining('aborted by caller'),
         expect.anything(),
       );
+      expectNoRecordAtWarningOrAbove();
     });
 
-    it('reports an AbortSignal.timeout() signal as Timeout', async () => {
-      hangUntilAborted();
-
-      const error = (await fetchWithTimeout('https://example.com', 30_000, context, {
-        signal: AbortSignal.timeout(10),
-      }).catch((e: unknown) => e)) as McpError;
+    it.each([
+      ['an empty message', ''],
+      ['a whitespace message', ' \n\t '],
+      ['a non-string message', 42],
+    ])('falls back to "timed out." for %s', async (_label, reasonMessage) => {
+      // The name is what marks a deadline, so a plain object stands in for any realm's reason.
+      const error = await abortWith({ name: 'TimeoutError', message: reasonMessage });
 
       expect(error.code).toBe(JsonRpcErrorCode.Timeout);
-      expect(error.data?.errorSource).toBe('FetchSignalTimeout');
+      expect(error.message).toBe('fetch GET https://api.example.com/…?… timed out.');
+      expect(error.data).toEqual({ errorSource: 'FetchSignalTimeout' });
+      expect(signalTimeoutRecords()).toEqual([error.message]);
+    });
+
+    it('falls back to "timed out." for a reason whose message throws on read', async () => {
+      const reason = { name: 'TimeoutError' };
+      Object.defineProperty(reason, 'message', {
+        get() {
+          throw new Error('no message for you');
+        },
+      });
+
+      const error = await abortWith(reason);
+
+      expect(error.code).toBe(JsonRpcErrorCode.Timeout);
+      expect(error.message).toBe('fetch GET https://api.example.com/…?… timed out.');
+      expect(error.data).toEqual({ errorSource: 'FetchSignalTimeout' });
+    });
+
+    it('names a URL inside the reason by its origin, in the throw and the record', async () => {
+      const error = await abortWith(
+        new DOMException(
+          'Budget for https://upstream.example.com/sk-live-0000/path?key=SECRET ran out.',
+          'TimeoutError',
+        ),
+      );
+
+      const message =
+        'fetch GET https://api.example.com/…?…: Budget for https://upstream.example.com/…?… ran out.';
+      expect(error.message).toBe(message);
+      expect(signalTimeoutRecords()).toEqual([message]);
+      const surfaces = JSON.stringify([error.message, infoSpy.mock.calls, errorSpy.mock.calls]);
+      expect(surfaces).not.toContain('sk-live-0000');
+      expect(surfaces).not.toContain('SECRET');
+    });
+
+    it('reports an AbortSignal.timeout() signal as Timeout carrying the runtime’s reason', async () => {
+      hangUntilAborted();
+      const signal = AbortSignal.timeout(10);
+
+      const error = (await fetchWithTimeout('https://example.com', 30_000, context, {
+        signal,
+      }).catch((e: unknown) => e)) as McpError;
+
+      // Node and Bun word this reason differently, so it is read off the signal.
+      const reasonMessage = (signal.reason as Error).message;
+      expect(reasonMessage.trim()).not.toBe('');
+      expect(error.code).toBe(JsonRpcErrorCode.Timeout);
+      expect(error.message).toBe(`fetch GET https://example.com: ${reasonMessage}`);
+      expect(error.data).toEqual({ errorSource: 'FetchSignalTimeout' });
     });
 
     it('reports a composed AbortSignal.any whose timeout fired as Timeout', async () => {
       hangUntilAborted();
       const request = new AbortController();
+      const signal = AbortSignal.any([request.signal, AbortSignal.timeout(10)]);
 
       const error = (await fetchWithTimeout('https://example.com', 30_000, context, {
-        signal: AbortSignal.any([request.signal, AbortSignal.timeout(10)]),
+        signal,
       }).catch((e: unknown) => e)) as McpError;
 
       expect(request.signal.aborted).toBe(false);
       expect(error.code).toBe(JsonRpcErrorCode.Timeout);
       expect(error.data?.errorSource).toBe('FetchSignalTimeout');
+      expect(error.message).toBe(
+        `fetch GET https://example.com: ${(signal.reason as Error).message}`,
+      );
+      expect(error.message).not.toContain("caller's signal");
     });
 
     it('keeps a composed AbortSignal.any cancelled by its other member as RequestCancelled', async () => {
@@ -530,7 +667,6 @@ describe('fetchWithTimeout', () => {
     ])(
       'classifies a fetch rejecting AbortError with %s as a network failure',
       async (_label, options) => {
-        const infoSpy = vi.spyOn(logger, 'info').mockImplementation(() => {});
         const rejection = new DOMException('aborted', 'AbortError');
         vi.spyOn(globalThis, 'fetch').mockRejectedValue(rejection);
 
@@ -549,16 +685,19 @@ describe('fetchWithTimeout', () => {
           errorSource: 'FetchNetworkErrorWrapper',
         });
         expect(error.cause).toBe(rejection);
-        expect(errorSpy).toHaveBeenCalledWith(
-          'Network error during fetch GET https://example.com: aborted',
-          expect.objectContaining({
-            extra: expect.objectContaining({
-              originalErrorName: 'AbortError',
-              errorSource: 'FetchNetworkError',
+        // The network-failure record, and no cancellation record beside it.
+        expect(infoSpy.mock.calls).toEqual([
+          [
+            'Network error during fetch GET https://example.com: aborted',
+            expect.objectContaining({
+              extra: expect.objectContaining({
+                originalErrorName: 'AbortError',
+                errorSource: 'FetchNetworkError',
+              }),
             }),
-          }),
-        );
-        expect(infoSpy).not.toHaveBeenCalled();
+          ],
+        ]);
+        expectNoRecordAtWarningOrAbove();
       },
     );
   });
@@ -844,6 +983,447 @@ describe('fetchWithTimeout', () => {
     });
   });
 
+  /**
+   * The helper follows redirects itself on every request (#883): each hop is
+   * fetched under `redirect: 'manual'` and rewritten by the Fetch Standard's
+   * redirect rules, which both runtimes' native following applies, so Node and
+   * Bun answer alike and every refusal is a typed failure `withRetry` does not
+   * repeat. Real-peer cases on both runtimes live in
+   * fetchWithTimeout.loopback.test.ts.
+   */
+  describe('redirect following (#883)', () => {
+    interface SentRequest {
+      body: unknown;
+      headers: Headers;
+      method: string;
+      redirect: RequestInit['redirect'];
+      url: string;
+    }
+
+    /** Answers each request by `answer`, keeping what every request carried. */
+    function upstream(answer: (url: URL, init: RequestInit) => Response | Promise<Response>) {
+      const sent: SentRequest[] = [];
+      const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+        const url = new URL(String(input));
+        sent.push({
+          url: url.href,
+          method: init?.method ?? 'GET',
+          headers: new Headers(init?.headers),
+          body: init?.body ?? null,
+          redirect: init?.redirect,
+        });
+        return answer(url, init ?? {});
+      });
+      return { sent, fetchMock };
+    }
+
+    const redirectTo = (status: number, location: string) =>
+      new Response(null, { status, headers: { location } });
+
+    /** One redirect from `/start` to `location`, then 200 for every other path. */
+    const oneHop = (status: number, location: string) => (url: URL) =>
+      url.pathname === '/start' ? redirectTo(status, location) : new Response('landed');
+
+    const streamBody = () =>
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('streamed'));
+          controller.close();
+        },
+      });
+
+    it.each<RequestInit['redirect']>([undefined, 'follow', 'manual', 'error'])(
+      'hands fetch redirect: manual when the caller passes %s',
+      async (redirect) => {
+        const { sent } = upstream(() => new Response('ok'));
+
+        await (
+          await fetchWithTimeout('https://example.com', 1000, context, {
+            ...(redirect && { redirect }),
+          })
+        ).text();
+
+        expect(sent.map((request) => request.redirect)).toEqual(['manual']);
+      },
+    );
+
+    it('follows a 301 to its 200, reporting redirected and the final URL', async () => {
+      const { sent } = upstream(oneHop(301, '/next/http://example.org/'));
+
+      const response = await fetchWithTimeout('https://example.com/start', 1000, context);
+
+      expect(response.status).toBe(200);
+      expect(response.redirected).toBe(true);
+      expect(response.url).toBe('https://example.com/next/http://example.org/');
+      expect(await response.text()).toBe('landed');
+      expect(sent.map((request) => request.url)).toEqual([
+        'https://example.com/start',
+        'https://example.com/next/http://example.org/',
+      ]);
+      expect(debugSpy).toHaveBeenCalledWith('Following redirect 1: https://example.com/…', context);
+    });
+
+    it('leaves redirected false and the url as the runtime set it when nothing redirects', async () => {
+      upstream(() => new Response('direct'));
+
+      const response = await fetchWithTimeout('https://example.com/start', 1000, context);
+
+      expect(response.redirected).toBe(false);
+      expect(await response.text()).toBe('direct');
+    });
+
+    it.each([
+      ['a final 204', 'GET', () => new Response(null, { status: 204 })],
+      ['a final HEAD', 'HEAD', () => new Response(null, { status: 200 })],
+    ])('reports redirected and url on %s', async (_label, method, final) => {
+      upstream((url) => (url.pathname === '/start' ? redirectTo(302, '/end#frag') : final()));
+
+      const response = await fetchWithTimeout('https://example.com/start', 1000, context, {
+        method,
+      });
+
+      expect(response.redirected).toBe(true);
+      // `Response.url` never carries a fragment.
+      expect(response.url).toBe('https://example.com/end');
+    });
+
+    it.each([300, 304])(
+      'returns a %d as final without the guard, as native following does',
+      async (status) => {
+        const { sent } = upstream(oneHop(status, '/chosen'));
+
+        const error = (await fetchWithTimeout('https://example.com/start', 1000, context).catch(
+          (e) => e,
+        )) as McpError;
+
+        expect(error.code).toBe(JsonRpcErrorCode.InvalidRequest);
+        expect(error.data).toMatchObject({ status, errorSource: 'FetchHttpError' });
+        expect(sent).toHaveLength(1);
+      },
+    );
+
+    it.each([300, 304])(
+      'follows a %d carrying a Location under rejectPrivateIPs, as the guarded loop always has',
+      async (status) => {
+        const { sent } = upstream(oneHop(status, '/chosen'));
+
+        const response = await fetchWithTimeout('https://example.com/start', 1000, context, {
+          rejectPrivateIPs: true,
+        });
+
+        expect(response.status).toBe(200);
+        expect(sent.map((request) => request.url)).toEqual([
+          'https://example.com/start',
+          'https://example.com/chosen',
+        ]);
+      },
+    );
+
+    it.each([
+      ['without the guard', {}],
+      ['under rejectPrivateIPs', { rejectPrivateIPs: true }],
+    ])('returns a 302 with an empty Location as final %s', async (_label, guard) => {
+      const { sent } = upstream(oneHop(302, ''));
+
+      const error = (await fetchWithTimeout(
+        'https://example.com/start',
+        1000,
+        context,
+        guard,
+      ).catch((e) => e)) as McpError;
+
+      expect(error.code).toBe(JsonRpcErrorCode.InvalidRequest);
+      expect(error.data).toMatchObject({ status: 302, errorSource: 'FetchHttpError' });
+      expect(sent).toHaveLength(1);
+    });
+
+    it('follows a 127-hop chain', async () => {
+      const { sent } = upstream((url) => {
+        const left = Number(url.pathname.slice(1));
+        return left > 0 ? redirectTo(302, `/${left - 1}`) : new Response('end');
+      });
+
+      const response = await fetchWithTimeout('https://example.com/127', 1000, context);
+
+      expect(await response.text()).toBe('end');
+      expect(sent).toHaveLength(128);
+    });
+
+    it('fails a redirect loop after 127 hops as too_many_redirects, with no retry and no record above debug', async () => {
+      const { sent } = upstream(() => redirectTo(302, '/loop'));
+
+      const error = (await withRetry(
+        () => fetchWithTimeout('https://example.com/loop', 1000, context),
+        { maxRetries: 3, baseDelayMs: 1, jitter: 0 },
+      ).catch((e) => e)) as McpError;
+
+      expect(error).toBeInstanceOf(McpError);
+      expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+      expect(error.data).toEqual({
+        maxRedirects: 127,
+        reason: 'too_many_redirects',
+        recovery: {
+          hint: 'Request the final URL directly instead of one that redirects more than 127 times.',
+        },
+      });
+      // 127 followed, the 128th answer refused, and no second attempt.
+      expect(sent).toHaveLength(128);
+      expect(debugSpy).toHaveBeenCalledWith(
+        'Following redirect 127: https://example.com/…',
+        context,
+      );
+      expect(infoSpy).not.toHaveBeenCalled();
+      expectNoRecordAtWarningOrAbove();
+    });
+
+    it('keeps the limit at 5 under rejectPrivateIPs', async () => {
+      const { sent } = upstream(() => redirectTo(302, '/loop'));
+
+      const error = (await fetchWithTimeout('https://example.com/loop', 1000, context, {
+        rejectPrivateIPs: true,
+      }).catch((e) => e)) as McpError;
+
+      expect(error.data).toMatchObject({ reason: 'too_many_redirects', maxRedirects: 5 });
+      expect(sent).toHaveLength(6);
+    });
+
+    it.each(['ftp://example.org/x', 'file:///etc/passwd', 'javascript:alert(1)'])(
+      'refuses a redirect to %s as invalid_url after one request, not retried',
+      async (location) => {
+        const { sent } = upstream(oneHop(302, location));
+
+        const error = (await withRetry(
+          () => fetchWithTimeout('https://example.com/start', 1000, context),
+          { maxRetries: 3, baseDelayMs: 1, jitter: 0 },
+        ).catch((e) => e)) as McpError;
+
+        expect(error.code).toBe(JsonRpcErrorCode.ValidationError);
+        expect(error.message).toBe('Only HTTP and HTTPS URLs are allowed.');
+        expect(error.data).toEqual({
+          reason: 'invalid_url',
+          recovery: { hint: 'Pass an absolute http:// or https:// URL.' },
+        });
+        expect(sent).toHaveLength(1);
+        expectNoRecordAtWarningOrAbove();
+      },
+    );
+
+    it("fails a 3xx under redirect: 'error' as InvalidRequest after one request, not retried", async () => {
+      const { sent } = upstream(oneHop(307, '/next'));
+
+      const error = (await withRetry(
+        () => fetchWithTimeout('https://example.com/start', 1000, context, { redirect: 'error' }),
+        { maxRetries: 3, baseDelayMs: 1, jitter: 0 },
+      ).catch((e) => e)) as McpError;
+
+      expect(error.code).toBe(JsonRpcErrorCode.InvalidRequest);
+      expect(error.message).toBe('Fetch failed for https://example.com/…. Status: 307');
+      expect(error.data).toMatchObject({ status: 307, errorSource: 'FetchHttpError' });
+      expect(sent).toHaveLength(1);
+    });
+
+    it.each(
+      [301, 302, 307, 308].flatMap((status) => [
+        [status, 'without the guard', false],
+        [status, 'under rejectPrivateIPs', true],
+      ]) as Array<[number, string, boolean]>,
+    )(
+      'fails a %d for a stream body %s as InvalidRequest after one request',
+      async (status, _label, rejectPrivateIPs) => {
+        const { sent } = upstream(oneHop(status, '/next'));
+
+        const error = (await fetchWithTimeout('https://example.com/start', 1000, context, {
+          rejectPrivateIPs,
+          method: 'POST',
+          body: streamBody(),
+          duplex: 'half',
+        }).catch((e) => e)) as McpError;
+
+        expect(error.code).toBe(JsonRpcErrorCode.InvalidRequest);
+        expect(error.data).toMatchObject({ status, errorSource: 'FetchHttpError' });
+        expect(sent).toHaveLength(1);
+      },
+    );
+
+    it('follows a 303 for a stream body as a bodiless GET', async () => {
+      const { sent } = upstream(oneHop(303, '/next'));
+
+      const response = await fetchWithTimeout('https://example.com/start', 1000, context, {
+        method: 'POST',
+        body: streamBody(),
+        duplex: 'half',
+      });
+
+      expect(await response.text()).toBe('landed');
+      expect(sent[1]).toMatchObject({ method: 'GET', body: null });
+    });
+
+    /**
+     * What each followed hop sends, against what Node's and Bun's native
+     * following send for the same chain. Held with and without the guard: one
+     * loop serves both.
+     */
+    describe.each([
+      ['without the guard', {}],
+      ['under rejectPrivateIPs', { rejectPrivateIPs: true }],
+    ])('each followed hop %s', (_label, guard) => {
+      const headers = {
+        authorization: 'Bearer token-0000',
+        cookie: 'sid=1',
+        'proxy-authorization': 'Basic cHJveHk=',
+        'content-type': 'text/plain',
+        'content-encoding': 'identity',
+        'content-language': 'en',
+        'content-location': '/payload',
+        'content-length': '7',
+        host: 'a.example',
+        'x-custom': 'kept',
+      };
+      const BODY_HEADERS = [
+        'content-type',
+        'content-encoding',
+        'content-language',
+        'content-location',
+        'content-length',
+      ];
+      const CREDENTIALS = ['authorization', 'cookie', 'proxy-authorization'];
+
+      /** The second request of a one-hop chain sent as `method` with a body. */
+      async function secondRequest(status: number, method: string, location = '/next') {
+        const { sent } = upstream(oneHop(status, location));
+        const response = await fetchWithTimeout('https://a.example/start', 1000, context, {
+          ...guard,
+          method,
+          headers,
+          ...(method !== 'GET' && method !== 'HEAD' && { body: 'payload' }),
+        });
+        await response.text();
+        expect(sent).toHaveLength(2);
+        return sent[1] as SentRequest;
+      }
+
+      const present = (request: SentRequest, names: string[]) =>
+        names.filter((name) => request.headers.has(name));
+
+      it.each([
+        [301, 'POST'],
+        [302, 'POST'],
+        [303, 'POST'],
+        [303, 'PUT'],
+        [303, 'DELETE'],
+      ])(
+        'continues a %d for a %s as a GET without the body or its headers',
+        async (status, method) => {
+          const request = await secondRequest(status, method);
+
+          expect(request.method).toBe('GET');
+          expect(request.body).toBeNull();
+          expect(present(request, BODY_HEADERS)).toEqual([]);
+          expect(request.headers.get('x-custom')).toBe('kept');
+          // Same origin: the credentials stay.
+          expect(present(request, CREDENTIALS)).toEqual(CREDENTIALS);
+        },
+      );
+
+      it.each([
+        [301, 'PUT'],
+        [302, 'PATCH'],
+        [307, 'POST'],
+        [308, 'PUT'],
+        [303, 'GET'],
+        [303, 'HEAD'],
+      ])('keeps the method and body of a %d for a %s', async (status, method) => {
+        const request = await secondRequest(status, method);
+
+        expect(request.method).toBe(method);
+        if (method === 'GET' || method === 'HEAD') {
+          expect(request.body).toBeNull();
+        } else {
+          expect(request.body).toBe('payload');
+          expect(present(request, BODY_HEADERS)).toEqual(BODY_HEADERS);
+        }
+        expect(present(request, CREDENTIALS)).toEqual(CREDENTIALS);
+      });
+
+      it('drops the credential headers on a hop to another origin, keeping the rest', async () => {
+        const request = await secondRequest(307, 'POST', 'https://b.example/next');
+
+        expect(request.url).toBe('https://b.example/next');
+        expect(present(request, CREDENTIALS)).toEqual([]);
+        // A caller-set `Host` names the old origin.
+        expect(request.headers.has('host')).toBe(false);
+        expect(request.headers.get('x-custom')).toBe('kept');
+        expect(request.headers.get('content-type')).toBe('text/plain');
+        expect(request.body).toBe('payload');
+      });
+
+      it('keeps them dropped for the rest of the chain, back on the first origin included', async () => {
+        const { sent } = upstream((url) => {
+          if (url.href === 'https://a.example/start')
+            return redirectTo(302, 'https://b.example/hop');
+          if (url.host === 'b.example') return redirectTo(302, 'https://a.example/back');
+          return new Response('back');
+        });
+
+        await (
+          await fetchWithTimeout('https://a.example/start', 1000, context, { ...guard, headers })
+        ).text();
+
+        expect(sent.map((request) => request.url)).toEqual([
+          'https://a.example/start',
+          'https://b.example/hop',
+          'https://a.example/back',
+        ]);
+        expect(present(sent[0] as SentRequest, CREDENTIALS)).toEqual(CREDENTIALS);
+        expect(present(sent[2] as SentRequest, CREDENTIALS)).toEqual([]);
+      });
+
+      it('cancels a followed hop’s body before the next request', async () => {
+        const events: string[] = [];
+        upstream((url) => {
+          events.push(`fetch ${url.pathname}`);
+          if (url.pathname !== '/start') return new Response('landed');
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                controller.enqueue(new TextEncoder().encode('moved'));
+              },
+              cancel() {
+                events.push('hop body cancelled');
+              },
+            }),
+            { status: 302, headers: { location: '/next' } },
+          );
+        });
+
+        await (await fetchWithTimeout('https://a.example/start', 1000, context, guard)).text();
+
+        expect(events).toEqual(['fetch /start', 'hop body cancelled', 'fetch /next']);
+      });
+    });
+
+    it('bounds the whole chain with timeoutMs', async () => {
+      const { sent } = upstream((url, init) =>
+        url.pathname === '/start'
+          ? redirectTo(302, '/slow')
+          : new Promise((_resolve, reject) => {
+              const signal = init.signal as AbortSignal;
+              signal.addEventListener('abort', () => reject(signal.reason));
+            }),
+      );
+
+      const error = (await fetchWithTimeout('https://example.com/start', 30, context).catch(
+        (e) => e,
+      )) as McpError;
+
+      expect(error).toMatchObject({
+        code: JsonRpcErrorCode.Timeout,
+        data: { errorSource: 'FetchTimeout' },
+      });
+      expect(sent).toHaveLength(2);
+    });
+  });
+
   describe('selected error headers (#302)', () => {
     /** Non-2xx carrying both a diagnostic header and a credential-bearing one. */
     function throttledResponse(): Response {
@@ -936,15 +1516,18 @@ describe('fetchWithTimeout', () => {
       expect(error.data?.headers).toEqual({ location: 'https://elsewhere.example/moved' });
     });
 
-    it('captures nothing from a 3xx that rejectPrivateIPs consumes first', async () => {
-      // The SSRF branch handles the redirect before the non-ok throw, so the
-      // selector never sees it — the two options do not compose.
+    it.each([
+      ['by default', {}],
+      ['under rejectPrivateIPs', { rejectPrivateIPs: true }],
+    ])('captures nothing from a 3xx the helper follows %s', async (_label, guard) => {
+      // A followed 3xx never reaches the non-ok throw, so the selector never
+      // sees it — `location` composes only with not following.
       vi.spyOn(globalThis, 'fetch').mockResolvedValue(
         new Response(null, { status: 302, headers: { location: 'https://example.com/loop' } }),
       );
 
       const error = (await fetchWithTimeout('https://loop.example.com', 1000, context, {
-        rejectPrivateIPs: true,
+        ...guard,
         errorHeaders: ['location'],
       }).catch((e) => e)) as McpError;
 
@@ -996,6 +1579,38 @@ describe('fetchWithTimeout', () => {
       expect(vi.getTimerCount()).toBe(0);
     });
 
+    it('writes no record when the caller cancels in the same tick as a read whose chunk is ready (#854)', async () => {
+      const levels = ['info', 'notice', 'warning', 'crit', 'alert', 'emerg'] as const;
+      const spies = [
+        debugSpy,
+        errorSpy,
+        ...levels.map((level) => vi.spyOn(logger, level).mockImplementation(() => {})),
+      ];
+      // Every pull hands over a chunk at once, so the source read settles with a value.
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(
+          new ReadableStream<Uint8Array>({
+            pull(controller) {
+              controller.enqueue(firstChunk());
+            },
+          }),
+          { status: 200 },
+        ),
+      );
+
+      const response = await fetchWithTimeout('https://example.com', 30_000, context);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const reader = (response.body as ReadableStream<Uint8Array>).getReader();
+      const read = reader.read();
+      const cancelled = reader.cancel('caller is done');
+
+      expect((await read).done).toBe(false);
+      await cancelled;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const messages = spies.flatMap((spy) => spy.mock.calls.map(([message]) => String(message)));
+      expect(messages.filter((m) => m.startsWith('Network error'))).toEqual([]);
+    });
+
     /**
      * Neither signal fired, so this is no timeout or cancellation: the body read
      * rejects with the network-failure wrapper the header phase would have
@@ -1007,7 +1622,6 @@ describe('fetchWithTimeout', () => {
     ])(
       'classifies %s mid-body as a network failure and disarms the deadline',
       async (_label, makeFailure) => {
-        const infoSpy = vi.spyOn(logger, 'info').mockImplementation(() => {});
         vi.useFakeTimers();
         const failure = makeFailure();
         vi.spyOn(globalThis, 'fetch').mockResolvedValue(
@@ -1037,17 +1651,18 @@ describe('fetchWithTimeout', () => {
           errorSource: 'FetchNetworkErrorWrapper',
         });
         expect(error.cause).toBe(failure);
-        expect(errorSpy).toHaveBeenCalledTimes(1);
-        expect(errorSpy).toHaveBeenCalledWith(
-          `Network error during fetch GET https://example.com: ${failure.message}`,
-          expect.objectContaining({
-            extra: expect.objectContaining({
-              originalErrorName: failure.name,
-              errorSource: 'FetchNetworkError',
+        expect(infoSpy.mock.calls).toEqual([
+          [
+            `Network error during fetch GET https://example.com: ${failure.message}`,
+            expect.objectContaining({
+              extra: expect.objectContaining({
+                originalErrorName: failure.name,
+                errorSource: 'FetchNetworkError',
+              }),
             }),
-          }),
-        );
-        expect(infoSpy).not.toHaveBeenCalled();
+          ],
+        ]);
+        expectNoRecordAtWarningOrAbove();
         expect(vi.getTimerCount()).toBe(0);
       },
     );
@@ -1130,11 +1745,6 @@ describe('fetchWithTimeout', () => {
     const keyUrl = 'https://api.example.com/sk-test-0000/reverse?lat=1&lon=2';
     const name = 'https://api.example.com/…?…';
     const PATH_PARTS = ['sk-test-0000', '/reverse', 'lat=1', 'lon=2'];
-    let infoSpy: MockInstance;
-
-    beforeEach(() => {
-      infoSpy = vi.spyOn(logger, 'info').mockImplementation(() => {});
-    });
 
     /** Every record the logger received, serialized — message and context alike. */
     function everyRecord(): string {
@@ -1210,7 +1820,7 @@ describe('fetchWithTimeout', () => {
 
       expect(error.code).toBe(JsonRpcErrorCode.Timeout);
       expect(error.message).toBe(`fetch GET ${name} timed out.`);
-      expect(errorSpy).toHaveBeenCalledWith(
+      expect(infoSpy).toHaveBeenCalledWith(
         `fetch GET ${name} timed out after 5ms.`,
         expect.anything(),
       );
@@ -1219,17 +1829,16 @@ describe('fetchWithTimeout', () => {
 
     it("names the request by origin when the caller's deadline fires", async () => {
       hangUntilAborted();
+      const signal = AbortSignal.timeout(5);
 
-      const error = (await fetchWithTimeout(keyUrl, 30_000, context, {
-        signal: AbortSignal.timeout(5),
-      }).catch((e) => e)) as McpError;
+      const error = (await fetchWithTimeout(keyUrl, 30_000, context, { signal }).catch(
+        (e) => e,
+      )) as McpError;
 
+      const message = `fetch GET ${name}: ${(signal.reason as Error).message}`;
       expect(error.data?.errorSource).toBe('FetchSignalTimeout');
-      expect(error.message).toBe(`fetch GET ${name} timed out on the caller's signal.`);
-      expect(errorSpy).toHaveBeenCalledWith(
-        `fetch GET ${name} timed out on the caller's signal.`,
-        expect.anything(),
-      );
+      expect(error.message).toBe(message);
+      expect(infoSpy).toHaveBeenCalledWith(message, expect.anything());
       expectNoPath(everyRecord());
     });
 
@@ -1260,7 +1869,7 @@ describe('fetchWithTimeout', () => {
 
       expect(error.code).toBe(JsonRpcErrorCode.ServiceUnavailable);
       expect(error.message).toBe(`Network error during fetch GET ${name}: connection reset`);
-      expect(errorSpy).toHaveBeenCalledWith(
+      expect(infoSpy).toHaveBeenCalledWith(
         `Network error during fetch GET ${name}: connection reset`,
         expect.anything(),
       );
@@ -1283,7 +1892,7 @@ describe('fetchWithTimeout', () => {
       const error = (await fetchWithTimeout(keyUrl, 1000, context).catch((e) => e)) as McpError;
 
       expect(error.message).toBe(`Network error during fetch GET ${name}: ${rendered}`);
-      expect(errorSpy).toHaveBeenCalledWith(
+      expect(infoSpy).toHaveBeenCalledWith(
         `Network error during fetch GET ${name}: ${rendered}`,
         expect.anything(),
       );
@@ -1358,7 +1967,7 @@ describe('fetchWithTimeout', () => {
           expect(cause.message).toBe(redacted);
           expect(cause.code).toBe(code);
           // The network-error record is written, its chain read from the same cause.
-          expect(errorSpy).toHaveBeenCalledWith(wrapperMessage, {
+          expect(infoSpy).toHaveBeenCalledWith(wrapperMessage, {
             ...context,
             extra: {
               originalErrorName: rejectionName,
@@ -1393,7 +2002,7 @@ describe('fetchWithTimeout', () => {
         const cause = error.cause as Error;
         expect(cause.message).toBe(redacted);
         expect(cause.cause).toBe(transport);
-        expect(errorSpy).toHaveBeenCalledWith(wrapperMessage, {
+        expect(infoSpy).toHaveBeenCalledWith(wrapperMessage, {
           ...context,
           extra: {
             originalErrorName: 'TypeError',
@@ -1588,24 +2197,21 @@ describe('fetchWithTimeout', () => {
 
       await fetchWithTimeout(url, 1000, context).catch(() => undefined);
 
-      expect(errorSpy).toHaveBeenCalledWith(
-        `Network error during fetch GET ${name}: fetch failed`,
-        {
-          ...context,
-          extra: {
-            originalErrorName: 'TypeError',
-            errorSource: 'FetchNetworkError',
-            causeChain: [
-              { name: 'TypeError', message: 'fetch failed' },
-              {
-                name: 'Error',
-                message: 'connect ECONNREFUSED 127.0.0.1:3614',
-                code: 'ECONNREFUSED',
-              },
-            ],
-          },
+      expect(infoSpy).toHaveBeenCalledWith(`Network error during fetch GET ${name}: fetch failed`, {
+        ...context,
+        extra: {
+          originalErrorName: 'TypeError',
+          errorSource: 'FetchNetworkError',
+          causeChain: [
+            { name: 'TypeError', message: 'fetch failed' },
+            {
+              name: 'Error',
+              message: 'connect ECONNREFUSED 127.0.0.1:3614',
+              code: 'ECONNREFUSED',
+            },
+          ],
         },
-      );
+      });
     });
 
     it("carries the rejection's own code, never its path (Bun shape)", async () => {
@@ -1618,7 +2224,7 @@ describe('fetchWithTimeout', () => {
 
       const error = (await fetchWithTimeout(url, 1000, context).catch((e) => e)) as McpError;
 
-      const record = errorSpy.mock.calls.at(-1)?.[1] as { extra: Record<string, unknown> };
+      const record = infoSpy.mock.calls.at(-1)?.[1] as { extra: Record<string, unknown> };
       expect(record.extra.causeChain).toEqual([
         {
           name: 'TypeError',
@@ -1627,7 +2233,9 @@ describe('fetchWithTimeout', () => {
         },
       ]);
       expect((error.cause as { code?: unknown }).code).toBe('ConnectionRefused');
-      expect(JSON.stringify(errorSpy.mock.calls)).not.toContain('sk-test-0000');
+      expect(JSON.stringify([infoSpy.mock.calls, errorSpy.mock.calls])).not.toContain(
+        'sk-test-0000',
+      );
     });
 
     it('logs a rejection with no cause and no string code exactly as before', async () => {
@@ -1635,7 +2243,7 @@ describe('fetchWithTimeout', () => {
 
       await fetchWithTimeout(url, 1000, context).catch(() => undefined);
 
-      expect(errorSpy).toHaveBeenCalledWith(
+      expect(infoSpy).toHaveBeenCalledWith(
         `Network error during fetch GET ${name}: connection reset`,
         {
           ...context,
@@ -1672,7 +2280,12 @@ describe('fetchWithTimeout', () => {
         message: quoted(name),
       });
       expect(handled.extra.errorData.causeChain.at(-1)?.code).toBe('Malformed_HTTP_Response');
-      const everything = JSON.stringify([errorSpy.mock.calls, error.message, error.data]);
+      const everything = JSON.stringify([
+        infoSpy.mock.calls,
+        errorSpy.mock.calls,
+        error.message,
+        error.data,
+      ]);
       expect(everything).not.toContain('sk-test-0000');
       expect(everything).not.toContain('key=1');
     });
@@ -2152,7 +2765,7 @@ describe('fetchWithTimeout', () => {
         });
       });
 
-      it('should not use manual redirect mode when SSRF protection is disabled', async () => {
+      it('uses manual redirect mode when SSRF protection is disabled too (#883)', async () => {
         const fetchMock = vi
           .spyOn(globalThis, 'fetch')
           .mockResolvedValue(new Response('ok', { status: 200 }));
@@ -2161,7 +2774,7 @@ describe('fetchWithTimeout', () => {
 
         expect(fetchMock).toHaveBeenCalledWith(
           'https://example.com',
-          expect.not.objectContaining({ redirect: 'manual' }),
+          expect.objectContaining({ redirect: 'manual' }),
         );
       });
 
@@ -2288,26 +2901,14 @@ describe('fetchWithTimeout', () => {
   describe('a redirect hop the SSRF guard rejects (#647)', () => {
     const ssrfOpts = { rejectPrivateIPs: true };
     const START = 'https://public.example.com';
-    let atWarningOrAbove: MockInstance[];
 
     beforeEach(() => {
-      atWarningOrAbove = [
-        vi.spyOn(logger, 'warning').mockImplementation(() => {}),
-        errorSpy,
-        vi.spyOn(logger, 'crit').mockImplementation(() => {}),
-        vi.spyOn(logger, 'alert').mockImplementation(() => {}),
-        vi.spyOn(logger, 'emerg').mockImplementation(() => {}),
-      ];
       // `inside.example` resolves to private space; every other name stays unresolvable.
       dnsSlots.lookup = vi.fn(async (hostname: string) => {
         if (hostname === 'inside.example') return [{ address: '10.9.8.7', family: 4 }];
         throw unresolvable();
       });
     });
-
-    function expectNoRecordAtWarningOrAbove() {
-      for (const spy of atWarningOrAbove) expect(spy).not.toHaveBeenCalled();
-    }
 
     const redirectTo = (location: string) =>
       new Response(null, { status: 302, headers: { location } });
@@ -2480,18 +3081,25 @@ describe('fetchWithTimeout', () => {
           code: JsonRpcErrorCode.ServiceUnavailable,
           data: { errorSource: 'FetchNetworkErrorWrapper' },
         });
-        expect(errorSpy).toHaveBeenCalledTimes(1);
-        expect(errorSpy).toHaveBeenCalledWith(
-          expect.stringMatching(/^Network error during fetch GET https:\/\/public\.example\.com: /),
-          expect.objectContaining({
-            extra: expect.objectContaining({
-              errorSource: 'FetchNetworkError',
-              causeChain: [
-                expect.objectContaining({ name: 'TypeError', code: expect.any(String) }),
-              ],
-            }),
-          }),
+        const networkRecords = infoSpy.mock.calls.filter(([message]) =>
+          String(message).startsWith('Network error'),
         );
+        expect(networkRecords).toEqual([
+          [
+            expect.stringMatching(
+              /^Network error during fetch GET https:\/\/public\.example\.com: /,
+            ),
+            expect.objectContaining({
+              extra: expect.objectContaining({
+                errorSource: 'FetchNetworkError',
+                causeChain: [
+                  expect.objectContaining({ name: 'TypeError', code: expect.any(String) }),
+                ],
+              }),
+            }),
+          ],
+        ]);
+        expectNoRecordAtWarningOrAbove();
       },
     );
 
@@ -2512,11 +3120,10 @@ describe('fetchWithTimeout', () => {
         code: JsonRpcErrorCode.Timeout,
         data: { errorSource: 'FetchTimeout' },
       });
-      expect(errorSpy).toHaveBeenCalledTimes(1);
-      expect(errorSpy).toHaveBeenCalledWith(
-        `fetch GET ${START} timed out after 30ms.`,
-        expect.anything(),
-      );
+      expect(
+        infoSpy.mock.calls.filter(([message]) => String(message).includes('timed out')),
+      ).toEqual([[`fetch GET ${START} timed out after 30ms.`, expect.anything()]]);
+      expectNoRecordAtWarningOrAbove();
     });
   });
 });

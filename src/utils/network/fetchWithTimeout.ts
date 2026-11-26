@@ -1,6 +1,7 @@
 /**
- * @fileoverview Provides a utility function to make fetch requests with a specified timeout
- * and optional SSRF protection including DNS resolution validation and redirect following.
+ * @fileoverview Provides a utility function to make fetch requests with a specified timeout,
+ * redirects followed by the helper itself, and optional SSRF protection including DNS
+ * resolution validation and per-hop redirect checks.
  * @module src/utils/network/fetchWithTimeout
  */
 import {
@@ -11,7 +12,7 @@ import {
   timeout,
   validationError,
 } from '@/types-global/errors.js';
-import { serverOnlyFields } from '@/utils/internal/error-handler/helpers.js';
+import { readField, serverOnlyFields, UNREADABLE } from '@/utils/internal/error-handler/helpers.js';
 import { logger } from '@/utils/internal/logger.js';
 import { type RequestContext, withExtra } from '@/utils/internal/requestContext.js';
 import { runtimeCaps } from '@/utils/internal/runtime.js';
@@ -155,11 +156,13 @@ export interface FetchWithTimeoutOptions extends Omit<RequestInit, 'signal'> {
    * so never name a header that carries a credential — and note that a
    * `Location` can itself carry a sensitive path, query, or token.
    *
-   * `location` is selectable under `redirect: 'manual'`, which is how a caller
-   * validates a redirect target before re-issuing. It does not compose with
-   * {@link FetchWithTimeoutOptions.rejectPrivateIPs}: that mode follows every 3xx
-   * carrying a `Location` in the per-hop branch below, so the throw path only sees
-   * a 3xx without one.
+   * `location` is selectable on a 3xx the helper does not follow: under
+   * `redirect: 'manual'`, which is how a caller validates a redirect target
+   * before re-issuing, under `'error'`, or for a status native following leaves
+   * alone (a 300, a 304). A followed 3xx never reaches the throw path, so under
+   * {@link FetchWithTimeoutOptions.rejectPrivateIPs}, which follows every 3xx
+   * carrying a `Location` whatever the `redirect` mode, only a non-303 answering
+   * a stream body throws with one.
    */
   errorHeaders?: string[];
   /**
@@ -201,9 +204,11 @@ export interface FetchWithTimeoutOptions extends Omit<RequestInit, 'signal'> {
    * fatal. See {@link assertDnsNotPrivate}. Available in Node, Bun, and
    * Cloudflare Workers under `nodejs_compat`.
    *
-   * When enabled, a 3xx carrying a `Location` is followed manually (up to
-   * {@link MAX_SSRF_REDIRECTS} hops) with SSRF validation applied to each redirect
-   * target; a 3xx without one fails as a non-2xx status.
+   * When enabled, every 3xx carrying a `Location` is followed whatever the
+   * `redirect` mode, up to {@link MAX_SSRF_REDIRECTS} hops, and each target is
+   * validated as the initial URL is; a 3xx without one fails as a non-2xx status.
+   * Each hop is otherwise rewritten by the rules every followed hop follows
+   * (see {@link fetchWithTimeout}).
    *
    * **Best-effort, not a hard guarantee — DNS rebinding / TOCTOU still applies.**
    * The pre-validation lookup and the native `fetch` call's own DNS resolution
@@ -225,8 +230,10 @@ export interface FetchWithTimeoutOptions extends Omit<RequestInit, 'signal'> {
    * to combine with the internal timeout signal. If this signal aborts before the
    * timeout fires, the fetch is cancelled immediately. An abort whose reason is a
    * `TimeoutError` — `AbortSignal.timeout()`, or an `AbortSignal.any` whose timeout
-   * member fired — throws `Timeout` with `data.errorSource: 'FetchSignalTimeout'`,
-   * logged at `error`, and not retried by `withRetry`'s default predicate, since a
+   * member fired — throws `Timeout` with `data.errorSource: 'FetchSignalTimeout'`
+   * and the message `<operation>: <reason message>` (`<operation> timed out.` when
+   * the reason's message is empty or unreadable), logged at `info`, and not retried
+   * by `withRetry`'s default predicate, since a
    * retry would reuse the fired signal. Any other abort is the caller going away and throws
    * `RequestCancelled` — logged at `info`, and never retried by `withRetry`. Either
    * holds in every phase: before the headers, during a 2xx body read, and while a
@@ -331,8 +338,38 @@ function isNonGlobalIpv6(ip: string): boolean {
 
 const PRIVATE_HOSTNAMES = new Set(['localhost', 'metadata.google.internal', 'metadata.internal']);
 
+/**
+ * Maximum number of redirects to follow without `rejectPrivateIPs`. At least
+ * what either runtime's native following reaches (Node stops at 20, Bun short
+ * of 127), so every chain followed natively still follows.
+ */
+const MAX_REDIRECTS = 127;
+
 /** Maximum number of redirects to follow when rejectPrivateIPs is enabled. */
 const MAX_SSRF_REDIRECTS = 5;
+
+/** The statuses native following follows: the Fetch Standard's redirect statuses. */
+const REDIRECT_STATUS = new Set([301, 302, 303, 307, 308]);
+
+/**
+ * Headers that describe a request body, dropped with it when a hop continues as a
+ * `GET`: the Fetch Standard's four, plus a caller-set `Content-Length`, which
+ * Node's native following drops too.
+ */
+const REQUEST_BODY_HEADERS = [
+  'content-encoding',
+  'content-language',
+  'content-location',
+  'content-type',
+  'content-length',
+];
+
+/**
+ * Headers dropped once a chain leaves the origin it was sent to: the credentials,
+ * and a caller-set `Host`, which names the old origin. Node's native following
+ * drops the same four.
+ */
+const CROSS_ORIGIN_DROPPED_HEADERS = ['authorization', 'cookie', 'proxy-authorization', 'host'];
 
 /** `data` for a target that is not an absolute `http:`/`https:` URL. */
 const INVALID_URL_DATA = {
@@ -516,6 +553,62 @@ async function assertDnsNotPrivate(hostname: string): Promise<void> {
 }
 
 /**
+ * A body `fetch` reads once — a stream or an async iterable — and so cannot
+ * resend, unlike a string, `Blob`, `FormData`, or buffer, which each request
+ * extracts afresh.
+ */
+function isStreamBody(body: RequestInit['body']): boolean {
+  return (
+    typeof body === 'object' &&
+    body !== null &&
+    (body instanceof ReadableStream || Symbol.asyncIterator in body)
+  );
+}
+
+/**
+ * Checks a redirect target as the initial URL is checked: by the SSRF guard
+ * under `rejectPrivateIPs`, for an `http:`/`https:` scheme otherwise.
+ */
+async function assertRedirectTarget(target: URL, rejectPrivate: boolean): Promise<void> {
+  if (rejectPrivate) await assertNotPrivateUrl(target.href);
+  else parseHttpUrl(target.href);
+}
+
+/**
+ * The request a followed hop sends, by the Fetch Standard's HTTP-redirect fetch,
+ * which Node's and Bun's native following apply: a 301 or 302 for a `POST`, and a
+ * 303 for any method but `GET` or `HEAD`, continue as a bodiless `GET` without the
+ * headers that describe the body; a hop to another origin drops the credential
+ * headers, and since each hop starts from the last one's request they stay
+ * dropped for the rest of the chain. Returns `init` itself when neither applies.
+ */
+function redirectInit(init: RequestInit, status: number, from: URL, to: URL): RequestInit {
+  const method = (init.method ?? 'GET').toUpperCase();
+  const asGet =
+    ((status === 301 || status === 302) && method === 'POST') ||
+    (status === 303 && method !== 'GET' && method !== 'HEAD');
+  const crossOrigin = from.origin !== to.origin;
+  if (!asGet && !crossOrigin) return init;
+
+  const headers = new Headers(init.headers);
+  if (asGet) for (const name of REQUEST_BODY_HEADERS) headers.delete(name);
+  if (crossOrigin) for (const name of CROSS_ORIGIN_DROPPED_HEADERS) headers.delete(name);
+  return { ...init, headers, ...(asGet && { method: 'GET', body: null }) };
+}
+
+/**
+ * Marks a response reached through one or more followed hops as native following
+ * would: `redirected` set, and `url` the final hop's without its fragment. A
+ * `manual` fetch reports neither.
+ */
+function markRedirected(response: Response, finalUrl: URL): void {
+  const url = new URL(finalUrl);
+  url.hash = '';
+  Object.defineProperty(response, 'url', { value: url.href, configurable: true });
+  Object.defineProperty(response, 'redirected', { value: true, configurable: true });
+}
+
+/**
  * Re-wraps a 2xx response so the request deadline keeps covering the body.
  *
  * `fetch` resolves once headers arrive, so a deadline disarmed at that point
@@ -524,7 +617,8 @@ async function assertDnsNotPrivate(hostname: string): Promise<void> {
  * The returned response streams through a passthrough that reports back when
  * the body closes, errors, or is cancelled, which is what disarms the deadline;
  * until then an expiring deadline aborts the stream mid-read and the caller's
- * body read rejects with the classified failure from `classify`.
+ * body read rejects with the classified failure from `classify`. A cancelled
+ * body is the caller's own outcome and writes no record.
  *
  * `new Response` cannot carry `url`/`redirected`/`type` across, so they are
  * restored onto the wrapper — a caller following redirects still sees the final
@@ -536,10 +630,18 @@ function withBodyDeadline(
   deadline: { settle: () => void; classify: (error: unknown) => McpError },
 ): Response {
   const source = body.getReader();
+  /**
+   * Set by `cancel()`. A source read in flight when the caller cancels settles
+   * afterwards — done, with a chunk already in hand, or rejected — on a stream
+   * that is already closed, so `pull()` must not touch the controller or
+   * classify anything once it is set: there is no reader left to receive it.
+   */
+  let cancelled = false;
   const monitored = new ReadableStream<Uint8Array>({
     async pull(controller) {
       try {
         const { done, value } = await source.read();
+        if (cancelled) return;
         if (done) {
           deadline.settle();
           controller.close();
@@ -547,11 +649,13 @@ function withBodyDeadline(
         }
         controller.enqueue(value);
       } catch (error) {
+        if (cancelled) return;
         deadline.settle();
         controller.error(deadline.classify(error));
       }
     },
     cancel(reason) {
+      cancelled = true;
       deadline.settle();
       return source.cancel(reason);
     },
@@ -587,11 +691,27 @@ function withBodyDeadline(
  * with neither signal behind it — a dropped connection — rejects the read with
  * the `ServiceUnavailable` a network failure before the headers raises.
  *
+ * Redirects are followed here, not by the runtime: every hop is fetched under
+ * `redirect: 'manual'`, so Node, Bun, and workerd follow a chain alike. A 301,
+ * 302, 303, 307, or 308 carrying a `Location` is followed, up to 127 hops, to that
+ * `Location` resolved against the current URL, by the Fetch Standard's rules: a
+ * 301 or 302 for a `POST`, and a 303 for any method but `GET` or `HEAD`, continue
+ * as a bodiless `GET` without `Content-Type`, `Content-Encoding`,
+ * `Content-Language`, `Content-Location`, or `Content-Length`; a 307 or 308 keeps
+ * the method and body; a hop to another origin drops `Authorization`, `Cookie`,
+ * and `Proxy-Authorization`, and a caller-set `Host`, for the rest of the chain.
+ * A followed hop's body is cancelled before the next request, a target that is
+ * not `http:`/`https:` throws `invalid_url`, and the response a chain ends on
+ * reports `redirected: true` and the final `url`. A non-303 is never followed when
+ * the body is a stream, which cannot be sent twice, and without the guard nothing
+ * is followed under `redirect: 'manual'` or `'error'`. `timeoutMs` bounds the
+ * whole chain.
+ *
  * When `options.rejectPrivateIPs` is `true`, the target URL is validated before the
- * request is sent, and every 3xx carrying a `Location` is followed manually with
- * per-hop SSRF checks (up to 5 hops). This mode forces `redirect: 'manual'` on the
- * underlying fetch. A hop the guard rejects throws the `ValidationError` the initial
- * URL would, with no record here.
+ * request is sent, every 3xx carrying a `Location` is followed whatever the
+ * `redirect` mode, and each hop's target is validated the same way, up to 5 hops.
+ * A hop the guard rejects throws the `ValidationError` the initial URL would, with
+ * no record here.
  *
  * Non-2xx responses are treated as errors. The response body is captured under a
  * byte budget (`options.errorBodyLimit`, default {@link ERROR_BODY_LIMIT}), logged,
@@ -602,9 +722,10 @@ function withBodyDeadline(
  * other 5xx → `ServiceUnavailable`).
  * A 501 additionally carries `data.retryable: false`, so `withRetry` fails it
  * fast instead of re-attempting a method the upstream does not implement. A 3xx
- * reaches this path when it is not followed — under `redirect: 'manual'`, or with
- * no `Location` header (a 304 included) — and maps to `InvalidRequest`, which
- * `withRetry` does not retry.
+ * reaches this path when it is not followed — with no `Location` header, for a
+ * non-303 when the body is a stream, or, without `rejectPrivateIPs`, under
+ * `redirect: 'manual'` or `'error'` or for a status outside the five above (a 300,
+ * a 304) — and maps to `InvalidRequest`, which `withRetry` does not retry.
  *
  * @param url - The URL to fetch (string or `URL` instance).
  * @param timeoutMs - Maximum duration in milliseconds before the exchange is aborted.
@@ -623,11 +744,13 @@ function withBodyDeadline(
  *   carrying a body this is a wrapper around the original: status, statusText,
  *   headers, `url`, `redirected`, and `type` are preserved, and the body streams
  *   through unchanged under the deadline.
- * @throws {McpError} `ValidationError` for a non-HTTP(S) URL, or if the URL targets
- *   a non-global/reserved address and `rejectPrivateIPs` is enabled. Under
- *   `rejectPrivateIPs` the same holds for each redirect target, plus
- *   `too_many_redirects` past 5 hops. Thrown with no record here; the caller logs it.
- * @throws {McpError} `Timeout` if the exchange exceeds `timeoutMs`. Raised from the
+ * @throws {McpError} `ValidationError` for a URL or redirect target that is not
+ *   `http:`/`https:` (`invalid_url`), for a redirect chain past 127 hops, or 5
+ *   under `rejectPrivateIPs` (`too_many_redirects`, with `data.maxRedirects`), and,
+ *   under `rejectPrivateIPs`, for a URL or redirect target at a non-global/reserved
+ *   address (`private_address_blocked`). Thrown with no record here; the caller logs it.
+ * @throws {McpError} `Timeout` if the exchange exceeds `timeoutMs`, logged at `info`
+ *   since the caller decides whether it is a failure. Raised from the
  *   call itself when the deadline expires before headers, and from the body read
  *   when it expires during the stream. A deadline that expires while a non-2xx body
  *   is being captured cuts only the diagnostic text: the status-mapped error below
@@ -653,7 +776,8 @@ function withBodyDeadline(
  *   headers, or from the body read when a 2xx body fails mid-stream; an unparseable
  *   redirect `Location` and an `AbortError` neither signal raised included — chaining
  *   the runtime's rejection as `cause` so its transport `code` (`ECONNREFUSED`,
- *   `ConnectionRefused`) survives; the failure record carries it as `causeChain`.
+ *   `ConnectionRefused`) survives; the failure record, at `info`, carries it as
+ *   `causeChain`. A cancelled 2xx body writes no record.
  * @example
  * ```ts
  * // Basic GET with a 5-second timeout
@@ -708,11 +832,6 @@ export async function fetchWithTimeout(
     ...fetchInit
   } = options ?? {};
 
-  // When SSRF protection is active, handle redirects manually to validate each hop
-  if (rejectPrivate) {
-    fetchInit.redirect = 'manual';
-  }
-
   // Use AbortController instead of AbortSignal.timeout() for cross-runtime compatibility
   // (AbortSignal.timeout() can fail in Bun's stdio transport due to realm mismatch)
   const controller = new AbortController();
@@ -743,10 +862,16 @@ export async function fetchWithTimeout(
    * below leaves it armed for the caller's read instead of disarming it at return.
    */
   let deadlineFollowsBody = false;
-  // Every failure below logs `context`; its thrown `data` reaches the client, a
-  // captured body aside (#590), and carries no request metadata (#548).
+  /**
+   * Every failure below logs `context`; its thrown `data` reaches the client, a
+   * captured body aside (#590), and carries no request metadata (#548). A
+   * timeout, a cancellation, and a network failure are recorded at `info`: the
+   * caller decides whether one is a failure — it may retry into a success or
+   * keep a partial body — and a tool, resource, or prompt handler that lets one
+   * escape gets its `error` record, `causeChain` included, from its factory.
+   */
   const timeoutFailure = (): McpError => {
-    logger.error(
+    logger.info(
       `${operationDescription} timed out after ${timeoutMs}ms.`,
       withExtra(context, { errorSource: 'FetchTimeout' }),
     );
@@ -757,16 +882,30 @@ export async function fetchWithTimeout(
      * A caller signal carrying a `TimeoutError` reason — `AbortSignal.timeout()`,
      * or an `AbortSignal.any` one of whose members is — fired on a deadline, not
      * because anyone withdrew the request. The name is matched rather than
-     * `instanceof DOMException`, which a cross-realm reason can fail.
+     * `instanceof DOMException`, which a cross-realm reason can fail, and both
+     * fields are read with `readField`, since a reason's getter can throw.
      */
-    if ((externalSignal?.reason as { name?: unknown } | undefined)?.name === 'TimeoutError') {
-      logger.error(
-        `${operationDescription} timed out on the caller's signal.`,
-        withExtra(context, { errorSource: 'FetchSignalTimeout' }),
-      );
-      return timeout(`${operationDescription} timed out on the caller's signal.`, {
-        errorSource: 'FetchSignalTimeout',
-      });
+    const reason: unknown = externalSignal?.reason;
+    if (
+      typeof reason === 'object' &&
+      reason !== null &&
+      readField(reason, 'name') === 'TimeoutError'
+    ) {
+      /**
+       * The deadline's own words name the budget it enforced, and attribute it
+       * to no one: the client reading the message is not "the caller". The
+       * reason is server-authored text, so a URL in it is reduced like any
+       * runtime text quoted here.
+       */
+      const reasonMessage = readField(reason, 'message');
+      const message =
+        typeof reasonMessage === 'string' &&
+        reasonMessage !== UNREADABLE &&
+        reasonMessage.trim() !== ''
+          ? `${operationDescription}: ${redactEmbeddedUrls(reasonMessage)}`
+          : `${operationDescription} timed out.`;
+      logger.info(message, withExtra(context, { errorSource: 'FetchSignalTimeout' }));
+      return timeout(message, { errorSource: 'FetchSignalTimeout' });
     }
     logger.info(
       `${operationDescription} aborted by caller.`,
@@ -800,7 +939,7 @@ export async function fetchWithTimeout(
         : error;
     const originalErrorName = error instanceof Error ? error.name : 'UnknownError';
     const causeChain = causeChainForLog(cause);
-    logger.error(
+    logger.info(
       `Network error during ${operationDescription}: ${errorMessage}`,
       withExtra(context, {
         originalErrorName,
@@ -824,8 +963,9 @@ export async function fetchWithTimeout(
   const method = (fetchInit.method ?? 'GET').toUpperCase();
   let statusCode = 0;
   /**
-   * The SSRF guard's rejection of a redirect hop, held so the catch below can
-   * tell it from a `fetch` rejection by identity rather than by type.
+   * A redirect hop's refusal — its target refused, or the hop limit passed —
+   * held so the catch below can tell it from a `fetch` rejection by identity
+   * rather than by type.
    */
   let hopRejection: McpError | undefined;
   /**
@@ -837,56 +977,71 @@ export async function fetchWithTimeout(
   let responseFailure: McpError | undefined;
 
   try {
-    let currentUrl: string | URL = url;
+    const maxRedirects = rejectPrivate ? MAX_SSRF_REDIRECTS : MAX_REDIRECTS;
+    /**
+     * Without the guard a caller's `redirect: 'manual'` or `'error'` opts out of
+     * following; the guard follows under every mode, as it always has.
+     */
+    const follows = rejectPrivate || (fetchInit.redirect ?? 'follow') === 'follow';
+    /**
+     * Every hop is fetched under `manual`, so the runtime never follows on its own
+     * (each one refuses different chains) and this loop decides every redirect.
+     * The caller's `url` goes to `fetch` as given; each later hop is the
+     * previous one's `init` rewritten by {@link redirectInit}.
+     */
+    let init: RequestInit = { ...fetchInit, redirect: 'manual', signal: fetchSignal };
+    let target: string | URL = url;
+    let currentUrl = parsedUrl;
     let redirectCount = 0;
 
     for (;;) {
-      const response = await fetch(currentUrl, {
-        ...fetchInit,
-        signal: fetchSignal,
-      });
+      const response = await fetch(target, init);
+      const { status } = response;
 
       /**
-       * Under SSRF protection, follow a 3xx that names its target, validating
-       * each hop. A 3xx with no `Location` — a 304 included — is a final
-       * response, as the platform's own redirect following returns it, and fails
-       * below like any other non-2xx.
+       * Follow a 3xx that names its target, with a status native following
+       * follows — any 3xx under the guard — unless the body is a stream, which
+       * only a 303 can follow, since it drops the body. Anything else is a final
+       * response, as native following returns it (a 3xx with no `Location`, or
+       * without the guard a 300 or 304), and fails below like any other non-2xx.
        */
       const location =
-        rejectPrivate && response.status >= 300 && response.status < 400
+        follows &&
+        (rejectPrivate ? status >= 300 && status < 400 : REDIRECT_STATUS.has(status)) &&
+        (status === 303 || !isStreamBody(init.body))
           ? response.headers.get('location')
           : null;
       if (location) {
+        await response.body?.cancel().catch(() => undefined);
         redirectCount++;
-        if (redirectCount > MAX_SSRF_REDIRECTS) {
+        if (redirectCount > maxRedirects) {
           hopRejection = validationError(
-            `Too many redirects (${MAX_SSRF_REDIRECTS}) — possible SSRF redirect loop`,
+            `Too many redirects (${maxRedirects}) — possible redirect loop`,
             {
-              maxRedirects: MAX_SSRF_REDIRECTS,
+              maxRedirects,
               reason: 'too_many_redirects',
               recovery: {
-                hint: `Request the final URL directly instead of one that redirects more than ${MAX_SSRF_REDIRECTS} times.`,
+                hint: `Request the final URL directly instead of one that redirects more than ${maxRedirects} times.`,
               },
             },
           );
           throw hopRejection;
         }
 
-        // Resolve relative redirect URLs against the current URL. An unparseable
-        // `Location` is a malformed response, not a guard rejection.
-        const redirectUrl = new URL(location, currentUrl.toString()).toString();
-
-        // Validate the redirect target against SSRF rules
-        await assertNotPrivateUrl(redirectUrl).catch((rejection: McpError) => {
+        // An unparseable `Location` is a malformed response, not a refusal of its target.
+        const next = new URL(location, currentUrl);
+        await assertRedirectTarget(next, rejectPrivate === true).catch((rejection: McpError) => {
           hopRejection = rejection;
           throw rejection;
         });
 
         logger.debug(
-          `Following validated redirect ${redirectCount}: ${redactUrl(redirectUrl)}`,
+          `Following ${rejectPrivate ? 'validated ' : ''}redirect ${redirectCount}: ${redactUrl(next)}`,
           context,
         );
-        currentUrl = redirectUrl;
+        init = redirectInit(init, status, currentUrl, next);
+        currentUrl = next;
+        target = next.href;
         continue;
       }
 
@@ -956,6 +1111,8 @@ export async function fetchWithTimeout(
         context,
       );
 
+      if (redirectCount > 0) markRedirected(response, currentUrl);
+
       // Nothing left to read (HEAD, 204, …) — the exchange is over, disarm at return.
       if (!response.body || NULL_BODY_STATUS.has(response.status)) return response;
 
@@ -1004,11 +1161,11 @@ export async function fetchWithTimeout(
     }
 
     /**
-     * The SSRF guard's rejection of a redirect hop — a blocked target, a
-     * non-HTTP scheme, too many hops — is the same policy refusal the initial
-     * URL gets before any request, and leaves the same way: thrown, with no
-     * record here, so the caller logs it at the severity its own contract
-     * declares. A deadline that fired first still reports the deadline, above.
+     * A redirect hop's refusal — a target the guard blocks, a non-HTTP scheme,
+     * too many hops — is the same policy refusal the initial URL gets before any
+     * request, and leaves the same way: thrown, with no record here, so the
+     * caller logs it at the severity its own contract declares. A deadline that
+     * fired first still reports the deadline, above.
      */
     if (hopRejection && error === hopRejection) throw error;
 

@@ -4,7 +4,7 @@ description: >
   McpError constructor, JsonRpcErrorCode reference, and error handling patterns for `@cyanheads/mcp-ts-core`. Use when looking up error codes, understanding where errors should be thrown vs. caught, or using ErrorHandler.tryCatch in services.
 metadata:
   author: cyanheads
-  version: "1.28"
+  version: "1.29"
   audience: external
   type: reference
 ---
@@ -515,7 +515,7 @@ Full status table:
 
 | Status | Code |
 |:-------|:-----|
-| 3xx | `InvalidRequest` — reachable when not followed (`redirect: 'manual'`, or no `Location`, a 304 included), and outside `withRetry`'s transient set since re-issuing returns the same redirect |
+| 3xx | `InvalidRequest` — reachable when not followed (`redirect: 'manual'` or `'error'`, no `Location`, a 300 or 304, or from `fetchWithTimeout` a non-303 answering a stream body), and outside `withRetry`'s transient set since re-issuing returns the same redirect |
 | 400 | `InvalidParams` |
 | 401 | `Unauthorized` |
 | 402, 403 | `Forbidden` |

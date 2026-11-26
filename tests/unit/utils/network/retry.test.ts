@@ -1217,7 +1217,13 @@ describe('withRetry over fetchWithTimeout — upstream 5xx policy (#323)', () =>
       errorSource: 'FetchNetworkErrorWrapper',
       retryAttempts: 3,
     });
-    expect(infoSpy).not.toHaveBeenCalled();
+    // One network-failure record per attempt (at info, #864), and no cancellation record.
+    expect(infoSpy.mock.calls.map(([message]) => message)).toEqual(
+      Array.from(
+        { length: 3 },
+        () => 'Network error during fetch GET https://api.example.com/…: aborted',
+      ),
+    );
   });
 
   // #819 — the retry count was already right; the exhausted error is now classified.
