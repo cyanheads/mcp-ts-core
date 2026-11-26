@@ -29,8 +29,8 @@
  *   4. `z.coerce.boolean()` on an env flag can't be turned off through the
  *      environment — `Boolean("false") === true`, so `"false"`/`"0"`/`"no"`
  *      all coerce to `true` and the only `false` is omitting the variable.
- *      Use `z.stringbool()` (parses `true/false/1/0/yes/no/on/off`, rejects
- *      the rest). Scoped to `src/` so it fires in consumer config too.
+ *      Use `z.stringbool()` (parses `true/false/1/0/yes/no/on/off/y/n/
+ *      enabled/disabled` in any case, rejects the rest). Scoped to `src/` so it fires in consumer config too.
  *
  * Runs standalone (`bun run scripts/check-framework-antipatterns.ts`) and as
  * a devcheck step.

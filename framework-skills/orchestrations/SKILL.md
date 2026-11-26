@@ -4,7 +4,7 @@ description: >
   Pick and run a multi-phase workflow that chains foundational task skills (`git-wrapup`, `release-and-publish`, `maintenance`, `field-test`, `setup`, etc.) end-to-end. Routes user intent to a workflow file under `workflows/` — greenfield builds, maintenance + release, field-test + fix, or known-work + release. Single source for the universal rules (no commits without authorization, no destructive git, no marketing language), the orchestrator posture (own the goal, ground sub-agents in primary sources, verify against the goal), and the sub-agent strategy (orient block, parallel fanout, isolation, normalization) that apply across every workflow. Sub-agents are an optional capability — workflows run linearly when fanout isn't available.
 metadata:
   author: cyanheads
-  version: "1.15"
+  version: "1.16"
   audience: external
   type: workflow
 ---
@@ -79,6 +79,8 @@ Why the framing matters:
 - **Sub-agent self-reports describe intent, not always reality.** A goal you wrote down beforehand is the falsification target — the sub-agent's report is a hypothesis to verify against it.
 - **Replanning is local.** When verification fails, the goal is unchanged; the orchestrator picks a different path (re-spawn with the failure context, re-slice the work, intervene directly). Phase rework doesn't cascade.
 
+**Think through the run before the first work phase.** Before the first phase that changes code (a design, build, fix, or maintenance phase), write a short plan overview for the whole run: the ask as understood, each target's approach and the alternatives set aside, what the work will touch, and the unknowns and risks. Surface it to the user in one message, then continue: the run's authorization covers the work, so this is a checkpoint, not a stop. Pause for a decision only when the overview shows the ask has materially different readings. A run with no judgment in it (a regeneration, a doc sync) skips this. Each editing sub-agent does the same for its own task before its first edit (Orient block).
+
 **Inform without inlining.** An enhanced sub-agent prompt names the specific primary sources and the goal — it does NOT paraphrase them. "Review GH issue #123 (read it via `gh issue view 123` and `gh issue view 123 --comments`); the goal is X; verify with Y" is the right shape. Pasting the issue body into the prompt forces the sub-agent to work from a paraphrase. Let the sub-agent read the source and explore for additional context as needed.
 
 ## Sub-Agent Strategy (if available)
@@ -129,7 +131,9 @@ order. If any file does not exist, note it and continue.
    List each source explicitly: `[primary source paths and gh commands]`. Skip this
    step only if no primary source applies (rare).
 
-Only after that, begin the task below.
+Only after that, begin the task below. Before your first edit, write a short
+plan overview (the task as you understand it, your approach, what you will
+touch, the unknowns) and put it at the top of your report.
 
 **Goal:** [the verifiable end state this phase must produce — concrete, testable]
 **Path:** [Tier 1 skill(s) and steps the sub-agent should follow]

@@ -4,7 +4,7 @@ description: >
   Review pass on an open release PR (`release/<version>` → `main`) — the step between `git-wrapup` and `release-and-publish` when a project releases in gated release PR mode. Reads the PR's commit range through the `code-simplifier` lens plus a correctness review, verifies whatever an automated reviewer left on the PR, lands fixes as ordinary commits on top of the release branch and pushes it, keeps the PR body in sync with what ships, and leaves one summary comment. The only agent role that both edits and commits — and it never rewrites pushed history, tags, merges, touches `main`, or publishes.
 metadata:
   author: cyanheads
-  version: "1.9"
+  version: "1.10"
   audience: external
   type: workflow
 ---
@@ -39,7 +39,9 @@ Read `framework-skills/code-simplifier/SKILL.md` in full. Read the changelog ent
 
 ### 2. Establish the review range
 
-The range is `main...HEAD` — every commit in the PR. `code-simplifier`'s Phase 1 looks at the uncommitted diff and, finding none, falls back to the last commit; override that here: the diff under review is `git diff main...HEAD`, and new files are the ones `git diff main...HEAD --name-status` marks `A`. Everything else in the simplifier procedure applies as written: read the full files, survey adjacent code, run the project gate once for a baseline. A red baseline is a finding to fix in this pass, not to note and move past. One cause is peculiar to a PR that sat open: a dependency the install age guard (`minimumReleaseAge` in `bunfig.toml`) held back at wrapup has crossed it, turning devcheck's outdated check red — take the bump as an ordinary `chore(deps)` commit in step 5, recorded in the changelog entry's `## Dependencies`.
+The range is `main...HEAD` — every commit in the PR. `code-simplifier`'s Phase 1 looks at the uncommitted diff and, finding none, falls back to the last commit; override that here: the diff under review is `git diff main...HEAD`, and new files are the ones `git diff main...HEAD --name-status` marks `A`. Everything else in the simplifier procedure applies as written: read the full files, survey adjacent code, run the project gate once for a baseline. A red baseline is a finding to fix in this pass, not to note and move past.
+
+**A simplifier pass the caller already ran.** When the brief states that `code-simplifier` ran over this release's tree before the PR opened, and that the full gate passed after it (the rows the PR body's `## Gates` carries), skip the simplifier lens and the baseline gate run, and skip reading `code-simplifier` in step 1. The release lens still covers every commit in the range, and a fix this pass lands still reruns the full gate in step 5. One cause is peculiar to a PR that sat open: a dependency the install age guard (`minimumReleaseAge` in `bunfig.toml`) held back at wrapup has crossed it, turning devcheck's outdated check red — take the bump as an ordinary `chore(deps)` commit in step 5, recorded in the changelog entry's `## Dependencies`.
 
 ### 3. Review
 
@@ -158,8 +160,8 @@ Then report back to the caller: PR number, new head SHA, whether the body change
 ## Checklist
 
 - [ ] On `release/<version>`, tree clean, PR open, PR head == local HEAD, no `v<version>` tag
-- [ ] `code-simplifier` read; review range is `main...HEAD`, full files read, gate baseline run
-- [ ] Simplifier lens and release lens both applied; correctness bugs fixed with a failing-first test
+- [ ] Review range is `main...HEAD`, full files read; `code-simplifier` read and gate baseline run, unless the brief records a pre-PR simplifier pass with the gate green after it
+- [ ] Release lens applied, plus the simplifier lens unless the caller already ran it; correctness bugs fixed with a failing-first test
 - [ ] Automated reviewer's comments read and verified; each taken or declined with the reason in the summary comment
 - [ ] Changelog entry and `summary:` reconciled to the diff; version strings consistent
 - [ ] Code scanning waited on in bounded foreground calls after the last push; open alerts on the PR's merge ref and on `main` each fixed, dismissed with a true reason, or cleared by deleting orphaned analyses

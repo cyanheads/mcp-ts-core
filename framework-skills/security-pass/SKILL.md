@@ -4,7 +4,7 @@ description: >
   Review an MCP server for common security gaps: LLM-facing surfaces as injection vector (tools, resources, prompts, descriptions), scope blast radius, destructive ops without consent, upstream auth shape, input sinks (URL / path / roots / shell / schema strictness / ReDoS), tenant isolation, leakage through errors and telemetry, unbounded resources, and HTTP-mode deployment surface. Use before a release, after a batch of handler changes, or when the user asks for a security review, audit, or hardening pass. Produces grouped findings and a numbered options list.
 metadata:
   author: cyanheads
-  version: "1.16"
+  version: "1.17"
   audience: external
   type: audit
 ---
@@ -60,7 +60,7 @@ Note: tool / resource / prompt counts, auth mode, storage provider, upstream API
 - `CANVAS_MAX_CANVASES_PER_TENANT`, `CANVAS_TTL_MS`, `CANVAS_ABSOLUTE_CAP_MS`, `CANVAS_EXPORT_PATH` values
 - Whether external rate limiting (CDN, reverse proxy, WAF) fronts the deployment — required to keep the ~10¹⁸ canvasId keyspace operationally infeasible to brute-force
 
-Use `TaskCreate` — one task per axis. Mark complete as you go.
+Before walking the axes, think the audit through and write the plan out: one item per axis that applies to this server (Axis 9 only when canvas is enabled), each marked off once its findings are captured. The written list is what keeps a long audit from silently skipping an axis. If your harness offers a task tool (such as `TaskCreate`), keep the list there; otherwise keep it in your response.
 
 **Run `fuzzTool` in parallel.** `@cyanheads/mcp-ts-core/testing/fuzz` catches crashes, memory leaks, and prototype pollution automatically on each tool — start it now so results are ready when you reach Axis 5.
 

@@ -4,7 +4,7 @@ description: >
   Reference for core and server configuration in `@cyanheads/mcp-ts-core`. Covers env var tables with defaults, priority order, server-specific Zod schema pattern, and Workers lazy-parsing requirement.
 metadata:
   author: cyanheads
-  version: "1.32"
+  version: "1.33"
   audience: external
   type: reference
 ---
@@ -293,7 +293,7 @@ setup(core) {
 },
 ```
 
-**Env booleans — use `z.stringbool()`, never `z.coerce.boolean()`.** `z.coerce.boolean()` runs `Boolean(value)`, so `"false"`, `"0"`, and `"no"` all coerce to `true` — the flag becomes impossible to disable through the environment except by omitting it entirely. `z.stringbool()` parses `true/false/1/0/yes/no/on/off` (case-insensitive) and rejects anything else, so `MY_VERBOSE_LOGGING=false` actually disables and a typo fails loudly at startup instead of silently coercing. An empty string is not in that accepted set — `z.stringbool()` rejects `''` with `Invalid option`. What makes a blank `.env` line take the default is the normalization layer described under **Unset means unset** below, not the schema type.
+**Env booleans — use `z.stringbool()`, never `z.coerce.boolean()`.** `z.coerce.boolean()` runs `Boolean(value)`, so `"false"`, `"0"`, and `"no"` all coerce to `true` — the flag becomes impossible to disable through the environment except by omitting it entirely. `z.stringbool()` parses `true/false`, `1/0`, `yes/no`, `on/off`, `y/n`, and `enabled/disabled` (case-insensitive, untrimmed) and rejects anything else, so `MY_VERBOSE_LOGGING=false` actually disables and a typo fails loudly at startup instead of silently coercing. An empty string is not in that accepted set — `z.stringbool()` rejects `''` with `Invalid option`. What makes a blank `.env` line take the default is the normalization layer described under **Unset means unset** below, not the schema type.
 
 **Env numbers — bound each one to the range its consumer accepts.** `z.coerce.number()` alone fails startup only on a non-number (`abc`); `-5`, `0`, `25.5`, and `4294967296` all start the server. A value that feeds a timer then fails every call that builds it: `AbortSignal.timeout()` throws on a negative value (`RangeError` on Node, `TypeError` on Bun), Node also rejects a fractional one or one past 2^32 - 1, `0` times out before any request goes out, and `setTimeout` past 2^31 - 1 ms fires after 1 ms. Give every timer `z.coerce.number().int().min(1).max(2_147_483_647)` (one shared schema when several variables are timers) and every count or cap `.int()` with the `min`/`max` the code needs, so an out-of-range value stops startup with the banner naming the variable.
 

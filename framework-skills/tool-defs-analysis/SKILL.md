@@ -4,7 +4,7 @@ description: >
   Read-only audit of MCP definition language across an existing surface — tools, resources, prompts, server instructions. Walks every definition file and checks 16 categories the LLM reads to decide whether and how to call: voice & tense, internal leaks, audience leaks, defaults, recovery hints, field descriptions, cross-references, sparsity, examples, structure, mutator observability, unit-bearing numeric names, validator-enforced constraints, annotations truthfulness, single-line strings, exclusive modes in the schema — then a cross-surface pass: naming taxonomy, parameter vocabulary, tool overlap, instructions drift, length outliers. Produces grouped findings with file:line citations and a numbered options list. Use during polish, after a refactor, or before a release. Complements `field-test` (behavior testing) and `security-pass` (security audit).
 metadata:
   author: cyanheads
-  version: "1.9"
+  version: "1.10"
   audience: external
   type: audit
 ---
@@ -55,7 +55,7 @@ find src/mcp-server/prompts/definitions   -type f -name "*.prompt.ts"  2>/dev/nu
 
 The `*tool.ts` / `*resource.ts` patterns also catch `*.app-tool.ts` / `*.app-resource.ts`. If the server's definitions live elsewhere (`examples/`, a packages workspace, …), audit those paths too. Also locate the server-level `instructions` string if the server sets one (the `createApp` option — `grep -rn "instructions" src/ --include="*.ts"`); it's audited in the cross-surface pass.
 
-Use `TaskCreate` — one task per file. Mark each complete after its findings are captured.
+Before walking the files, think the audit through and write the plan out: one item per file in the inventory, plus the cross-surface pass, each marked off once its findings are captured. The written list is what keeps a long audit from silently skipping a file. If your harness offers a task tool (such as `TaskCreate`), keep the list there; otherwise keep it in your response.
 
 ### 2. Walk the 16 categories per file
 
