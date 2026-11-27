@@ -269,6 +269,10 @@ interface DevcheckConfig {
   skillVersions?: {
     ignore?: string[];
   };
+  /** Pathspecs the TODOs/FIXMEs step excludes, read by {@link todosIgnoreExcludes}. */
+  todos?: {
+    ignore?: string[];
+  };
 }
 
 function loadDevcheckConfig(rootDir: string): DevcheckConfig {
@@ -284,6 +288,26 @@ function loadDevcheckConfig(rootDir: string): DevcheckConfig {
 const DEVCHECK_CONFIG = loadDevcheckConfig(ROOT_DIR);
 
 const OUTDATED_ALLOWLIST = new Set(DEVCHECK_CONFIG.outdated?.allowlist ?? []);
+
+/**
+ * `devcheck.config.json` `todos.ignore` as TODOs/FIXMEs pathspec excludes. Each
+ * entry is a git pathspec relative to the project root (a file, a directory, or
+ * a wildcard such as `*.txt`) for files that hold the marker words as data, like
+ * a generated word list. Throws when the value is not an array of non-empty
+ * strings: an empty entry becomes the pathspec `:!`, which excludes every file.
+ */
+function todosIgnoreExcludes(): string[] {
+  const ignore: unknown = DEVCHECK_CONFIG.todos?.ignore ?? [];
+  if (
+    !Array.isArray(ignore) ||
+    !ignore.every((entry) => typeof entry === 'string' && entry !== '')
+  ) {
+    throw new Error(
+      'devcheck.config.json todos.ignore must be an array of non-empty pathspec strings.',
+    );
+  }
+  return ignore.map((entry) => `:!${entry}`);
+}
 
 /** Use bun for package management commands if available, otherwise npm. */
 const PM_CMD = spawnSync('bun', ['--version'], { stdio: 'ignore' }).status === 0 ? 'bun' : 'npm';
@@ -679,10 +703,11 @@ const ALL_CHECKS: Check[] = [
       // -w is git's own whole-word test: macOS's regex library reads `\b` in an
       // extended regex as a literal `b`. Case-sensitive, so a lowercase `todo`
       // variable or stop word is not a marker.
-      const baseCmd = ['git', 'grep', '-nwE', '(TODO|FIXME)'];
+      const pattern = ['-nwE', '(TODO|FIXME)'];
       // Exclude files where TODO/FIXME appears as prose or intentional stubs:
       // changelogs, tests, this script, and the framework's skill prose wherever
-      // the maintenance sync copies it.
+      // the maintenance sync copies it, then the project's own data paths from
+      // devcheck.config.json `todos.ignore`. Both modes apply every exclude.
       const excludes = [
         ':!CHANGELOG.md',
         ':!changelog/',
@@ -695,13 +720,15 @@ const ALL_CHECKS: Check[] = [
         ':!.codex/skills/',
         ':!.cursor/skills/',
         ':!.windsurf/skills/',
+        ...todosIgnoreExcludes(),
       ];
       if (ctx.isHuskyHook && ctx.stagedFiles.length > 0) {
         // Check only staged files in the working tree
-        return [...baseCmd, '--', ...excludes, ...ctx.stagedFiles];
+        return ['git', 'grep', ...pattern, '--', ...excludes, ...ctx.stagedFiles];
       }
-      // Check the entire tracked repository (default behavior of git grep)
-      return [...baseCmd, '--', ...excludes];
+      // Check the whole working tree: tracked files, plus the untracked files git
+      // does not ignore, so a file a change adds fails before it is staged.
+      return ['git', 'grep', '--untracked', ...pattern, '--', ...excludes];
     },
     // git grep: exit 0 = matches found, exit 1 = no matches, exit 2+ = error.
     isSuccess: (result) => {
@@ -711,22 +738,27 @@ const ALL_CHECKS: Check[] = [
       // but override stdout so the summary shows the actual error, not "TODOs found".
       return false;
     },
-    tip: (c) => `Resolve ${c.bold('TODO')} or ${c.bold('FIXME')} comments before committing.`,
+    tip: (c) =>
+      `Resolve ${c.bold('TODO')} or ${c.bold('FIXME')} comments before committing; list paths that hold the words as data in ${c.bold('devcheck.config.json')} ${c.bold('todos.ignore')}.`,
   },
   {
     name: 'Tracked Secrets',
     flag: '--no-secrets',
     canFix: false,
-    // Check if common sensitive files are tracked by git. `:(glob)` makes `**/`
-    // match zero or more directories, so each shape is caught at the repository
-    // root too; under it `*` stops at `/`, so the two name-prefix shapes carry a
-    // `/**` twin for the files inside a directory of that name (`secrets/`,
-    // `.env.d/`).
+    // Lists common sensitive files in the working tree: tracked ones, plus the
+    // untracked ones git does not ignore, so a file a change adds fails before it
+    // is staged. `:(glob)` makes `**/` match zero or more directories, so each
+    // shape is caught at the repository root too; under it `*` stops at `/`, so
+    // the two name-prefix shapes carry a `/**` twin for the files inside a
+    // directory of that name (`secrets/`, `.env.d/`).
     getCommand: () => {
       if (!isGitRepo()) return null; // no repo — `git ls-files` would exit 128, not a finding
       return [
         'git',
         'ls-files',
+        '--cached',
+        '--others',
+        '--exclude-standard',
         ':(glob)**/*.env*',
         ':(glob)**/*.env*/**',
         ':(glob)**/.npmrc',
@@ -752,7 +784,7 @@ const ALL_CHECKS: Check[] = [
       return dangerous.length === 0;
     },
     tip: (c) =>
-      `Add sensitive files to ${c.bold('.gitignore')} and run ${c.bold('git rm --cached <file>')}.`,
+      `Add sensitive files to ${c.bold('.gitignore')}, and run ${c.bold('git rm --cached <file>')} for any already tracked.`,
   },
   {
     name: 'MCP Definitions',
@@ -767,13 +799,15 @@ const ALL_CHECKS: Check[] = [
     flag: '--no-packaging',
     canFix: false,
     // Validates env var alignment between manifest.json (MCPB bundle) and
-    // server.json (MCP Registry), plus plugin marketplace manifests (#240) and
-    // the Agent Plugins root pair (#426), the bundle-content guards on
-    // .mcpbignore (#343), the README version badge (#418), the Dockerfile build
-    // platform, the launch shape of server.json npm entries (#622), and the
-    // published root skills/ tree (#429). Runs when any of those inputs is
-    // present; skipped cleanly when none exist — consumers on an HTTP-only
-    // deploy are unaffected.
+    // server.json (MCP Registry), plus plugin marketplace manifests
+    // (cyanheads/mcp-ts-core#240) and the Agent Plugins root pair
+    // (cyanheads/mcp-ts-core#426), the bundle-content guards on .mcpbignore
+    // (cyanheads/mcp-ts-core#343), the README version badge
+    // (cyanheads/mcp-ts-core#418), the Dockerfile build platform, the launch
+    // shape of server.json npm entries (cyanheads/mcp-ts-core#622), and the
+    // published root skills/ tree (cyanheads/mcp-ts-core#429). Runs when any of
+    // those inputs is present; skipped cleanly when none exist — consumers on an
+    // HTTP-only deploy are unaffected.
     // README.md, Dockerfile, server.json, and skills are triggers in their own right:
     // each check must gate a project that carries no bundle or plugin metadata
     // at all, which the other inputs only covered incidentally.
@@ -814,9 +848,10 @@ const ALL_CHECKS: Check[] = [
     flag: '--no-dep-specifiers',
     canFix: false,
     // Rejects floating specifiers (latest/*/dist-tags) in package.json + the
-    // bun.lock workspaces map (#246). Static and local — no network, no git —
-    // so it runs in the default and --fast passes. Shipped to consumers via
-    // package.json `files:`; reads package.json/bun.lock directly, no guard.
+    // bun.lock workspaces map (cyanheads/mcp-ts-core#246). Static and local — no
+    // network, no git — so it runs in the default and --fast passes. Shipped to
+    // consumers via package.json `files:`; reads package.json/bun.lock directly,
+    // no guard.
     getCommand: () => ['bun', 'run', 'scripts/check-dependency-specifiers.ts'],
     tip: (c) =>
       `Pin the flagged dep to a concrete range; after ${c.bold('bun update --latest')} run a plain ${c.bold('bun install')} to reconcile ${c.bold('bun.lock')}.`,
@@ -825,8 +860,9 @@ const ALL_CHECKS: Check[] = [
     name: 'Open-Indexed Interfaces',
     flag: '--no-open-index',
     canFix: false,
-    // Framework-only AST check (#123): flags interfaces mixing named members with an
-    // open `[key: string]: unknown|any` index signature that lack an opt-out comment.
+    // Framework-only AST check (cyanheads/mcp-ts-core#123): flags interfaces mixing
+    // named members with an open `[key: string]: unknown|any` index signature that
+    // lack an opt-out comment.
     // Not shipped in package.json `files:`, so the existence guard skips it cleanly in
     // consumer projects — the pattern is common and legitimate in consumer code.
     getCommand: () => {
@@ -878,10 +914,10 @@ const ALL_CHECKS: Check[] = [
     flag: '--no-skill-versions',
     canFix: false,
     // Flags framework-skills/<name>/SKILL.md body changes (vs HEAD) that lack a metadata.version
-    // bump (#99), and, in the framework repo, a skill bumped more than one step past the last
-    // release tag. Skipped when framework-skills/ is absent. Drift is demoted to a warning via
-    // isSuccess — the typo/whitespace carve-out lives in devcheck.config.json
-    // `skillVersions.ignore`.
+    // bump (cyanheads/mcp-ts-core#99), and, in the framework repo, a skill bumped more than one
+    // step past the last release tag. Skipped when framework-skills/ is absent. Drift is
+    // demoted to a warning via isSuccess — the typo/whitespace carve-out lives in
+    // devcheck.config.json `skillVersions.ignore`.
     getCommand: () => {
       if (!existsSync(path.join(ROOT_DIR, 'framework-skills'))) return null;
       return ['bun', 'run', 'scripts/check-skill-versions.ts'];
@@ -901,7 +937,8 @@ const ALL_CHECKS: Check[] = [
     canFix: false,
     // --check exits non-zero if CHANGELOG.md drifts from changelog/*.md.
     // Skipped cleanly when the directory-based changelog isn't in use — CHANGELOG.md
-    // alone is a supported configuration (runtime-only consumers, opt-out per #41).
+    // alone is a supported configuration (runtime-only consumers, opt-out per
+    // cyanheads/mcp-ts-core#41).
     getCommand: () => {
       if (!existsSync(path.join(ROOT_DIR, 'changelog'))) return null;
       return ['bun', 'run', 'scripts/build-changelog.ts', '--check'];
@@ -943,11 +980,12 @@ const ALL_CHECKS: Check[] = [
     flag: '--no-types-worker',
     canFix: false,
     // The workerd type environment is its own program: Cloudflare's ambient
-    // globals cannot share one with @types/node's (#397). It reads the built
-    // declarations, so it only has something to check after a build. The
-    // tsconfig is looked for in both supported layouts — `config/` and the
-    // project root, which is where the `init` scaffold writes its tsconfigs
-    // (#440) — and the step skips only when neither carries one.
+    // globals cannot share one with @types/node's (cyanheads/mcp-ts-core#397).
+    // It reads the built declarations, so it only has something to check after
+    // a build. The tsconfig is looked for in both supported layouts — `config/`
+    // and the project root, which is where the `init` scaffold writes its
+    // tsconfigs (cyanheads/mcp-ts-core#440) — and the step skips only when
+    // neither carries one.
     getCommand: (ctx) => {
       const project = WORKER_PROJECT_CANDIDATES.find((candidate) =>
         existsSync(path.join(ctx.rootDir, candidate)),
@@ -1120,8 +1158,8 @@ const UI = {
    * The running-log line for a finished step. A result `isSuccess` demoted to a
    * warning is reported as one here too, on `printSummary`'s own guard
    * (`exitCode === 0 && warning`), so the two surfaces cannot disagree about a
-   * single outcome (#344). A `{ success: false, warning }` return keeps its
-   * non-zero exit and so still renders as a failure.
+   * single outcome (cyanheads/mcp-ts-core#344). A `{ success: false, warning }`
+   * return keeps its non-zero exit and so still renders as a failure.
    */
   formatCheckResult(result: CommandResult, _mode: UIMode): string {
     const { checkName, exitCode, duration, warning } = result;

@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /**
  * @fileoverview Guards against framework antipatterns via `git grep` over
- * `src/`. Rules 1–3 are SDK-coupling regressions scoped to framework-internal
+ * `src/` in the working tree, untracked files included and git's ignore rules
+ * applied. Rules 1–3 are SDK-coupling regressions scoped to framework-internal
  * paths — they no-op in consumer projects, where those paths either don't exist
  * or hold consumer code under different conventions. Rule 4 (`z.coerce.boolean()`)
  * is intentionally consumer-facing: it catches the env-boolean footgun in both
@@ -16,7 +17,8 @@
  *      schema advertising. Consumer-side `.passthrough()` on output schemas
  *      is a documented escape hatch and stays legal (rule is scoped to
  *      `src/mcp-server/tools/`). The one sanctioned substitution is
- *      `deferValidation()` (#377, #846): it projects the same JSON Schema and
+ *      `deferValidation()` (cyanheads/mcp-ts-core#377,
+ *      cyanheads/mcp-ts-core#846): it projects the same JSON Schema and
  *      moves only *where* a rejection is reported. Anything that widens what
  *      is advertised is still a violation.
  *   2. Mutating `RegisteredTool.inputSchema` after register breaks
@@ -24,8 +26,8 @@
  *      time.
  *   3. Matching the MCP SDK's error text at the transport layer (e.g. regex on
  *      `"Input validation error"`) is brittle across SDK versions. Any fix for
- *      #66 that intervenes at transport should use a structural signal, not a
- *      string match.
+ *      cyanheads/mcp-ts-core#66 that intervenes at transport should use a
+ *      structural signal, not a string match.
  *   4. `z.coerce.boolean()` on an env flag can't be turned off through the
  *      environment — `Boolean("false") === true`, so `"false"`/`"0"`/`"no"`
  *      all coerce to `true` and the only `false` is omitting the variable.
@@ -108,10 +110,14 @@ function isCommentLine(line: string): boolean {
   return t.startsWith('//') || t.startsWith('*') || t.startsWith('/*');
 }
 
+/**
+ * Runs one rule over the working tree: tracked files plus the untracked files
+ * git does not ignore, so a violation in a file a change adds fails before the
+ * file is staged.
+ */
 function runRule(rule: Rule): Finding[] {
-  const result = spawnSync('git', ['grep', '-nE', rule.pattern, '--', ...rule.pathspec], {
-    encoding: 'utf-8',
-  });
+  const args = ['grep', '--untracked', '-nE', rule.pattern, '--', ...rule.pathspec];
+  const result = spawnSync('git', args, { encoding: 'utf-8' });
 
   // git grep: exit 0 = matches, exit 1 = no matches, exit >=2 = error
   if (result.status === 1) return [];

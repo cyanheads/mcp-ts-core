@@ -75,17 +75,19 @@ security: false
   Example — same fact, right size:
 
     TOO LONG: **`fetchWithTimeout`'s `timeoutMs` bounds the whole exchange**
-    (#341). `fetch` resolves once headers arrive and the deadline was
-    cleared as the helper returned, so a peer that answered promptly and
-    then stalled the stream held the request open indefinitely. A 2xx
-    carrying a body now comes back as a passthrough wrapper that disarms
-    the deadline when the body closes, errors, or is cancelled; …
+    ([#341](https://github.com/cyanheads/mcp-ts-core/issues/341)). `fetch`
+    resolves once headers arrive and the deadline was cleared as the helper
+    returned, so a peer that answered promptly and then stalled the stream
+    held the request open indefinitely. A 2xx carrying a body now comes back
+    as a passthrough wrapper that disarms the deadline when the body closes,
+    errors, or is cancelled; …
     [+90 more words of mechanism and edge cases]
 
     RIGHT: **`fetchWithTimeout`'s `timeoutMs` now bounds the whole
-    exchange, not just the headers** (#341). A stalled body aborts with
-    the same `Timeout` error; the returned `Response` is a wrapper, so
-    identity assertions (`toBe(response)`) no longer hold.
+    exchange, not just the headers**
+    ([#341](https://github.com/cyanheads/mcp-ts-core/issues/341)). A stalled
+    body aborts with the same `Timeout` error; the returned `Response` is a
+    wrapper, so identity assertions (`toBe(response)`) no longer hold.
 
   Narrative intro: skip by default. Add one short sentence only when the
   release theme genuinely needs framing the bullets can't carry. When many

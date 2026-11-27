@@ -8,20 +8,24 @@
  *      validation (a measured real-world bundle dropped 61 MB → 12.9 MB).
  *   2. Exact-name strip of four entry classes nested under `node_modules/`,
  *      which root-anchored `.mcpbignore` patterns cannot reach by design
- *      (issues #146/#207):
+ *      (cyanheads/mcp-ts-core#146, cyanheads/mcp-ts-core#207):
  *        a. Dependency-shipped agent docs at an installed package's root —
  *           `framework-skills/`, `skills/`, `.claude/`, `.agents/` trees and
- *           `AGENTS.md`/`CLAUDE.md` — plus `SKILL.md` files anywhere (issues
- *           #230/#794/#820). A `skills/` below a package root is runtime code.
+ *           `AGENTS.md`/`CLAUDE.md` — plus `SKILL.md` files anywhere
+ *           (cyanheads/mcp-ts-core#230, cyanheads/mcp-ts-core#794,
+ *           cyanheads/mcp-ts-core#820). A `skills/` below a package root is
+ *           runtime code.
  *        b. Platform-specific native bindings, which would otherwise lock the
  *           bundle to the build host's platform and push it past the 25 MB cap
- *           registries enforce (issue #274).
+ *           registries enforce (cyanheads/mcp-ts-core#274).
  *        c. node-gyp build output beside a `binding.gyp` — generator files,
  *           intermediate trees, and link inputs, which record the packing
- *           host's paths; compiled `*.node` addons stay (issue #783).
+ *           host's paths; compiled `*.node` addons stay
+ *           (cyanheads/mcp-ts-core#783).
  *        d. Build-only package files — mcp-ts-core's `changelog/`, `config/`,
  *           `scripts/`, `templates/`, `biome.json`, and `vitest.config.base.mjs`,
- *           and better-sqlite3's `deps/` and `src/` C sources (issue #791).
+ *           and better-sqlite3's `deps/` and `src/` C sources
+ *           (cyanheads/mcp-ts-core#791).
  *   3. Re-list and assert zero matching entries remain.
  *
  * Entry names are passed to `zip -d` with `-nw` (no-wildcard) so they match

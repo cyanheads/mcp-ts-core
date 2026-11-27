@@ -7,7 +7,8 @@
  * but writes the literal `latest` dist-tag into the lock's workspace map; the
  * concrete resolution is correct at write time, so it clears every other gate
  * and ships unnoticed, letting the next `bun install` re-resolve the dep past
- * the `package.json` range and past any intentional version hold (#246).
+ * the `package.json` range and past any intentional version hold
+ * (cyanheads/mcp-ts-core#246).
  *
  * Section-specific rules — `peer`/`optional` may legitimately float to "any
  * host version", so `*` and dist-tags are allowed there; `latest` never is:

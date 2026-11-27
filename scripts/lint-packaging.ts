@@ -20,12 +20,13 @@
  *      directory (`KNOWN_DEV_DIRS`) and dev file (`KNOWN_DEV_FILES`), whether
  *      or not the path exists yet — `mcpb pack` reads `.mcpbignore`, not
  *      `.gitignore`, so source, tests, agent docs, and gitignored local files
- *      ship otherwise. Each error names the anchored line to add (issue #508).
+ *      ship otherwise. Each error names the anchored line to add
+ *      (cyanheads/mcp-ts-core#508).
  *      Root `skills/` is never required: it holds skills the server publishes.
  *   6. Bundle-content guard: `.mcpbignore` must not use unanchored patterns
  *      for root dev dirs or files — an unanchored `docs/` or `CLAUDE.md` also
  *      strips `node_modules/x/docs/` and `node_modules/x/CLAUDE.md` (runtime
- *      path bypass, issues #172/#207).
+ *      path bypass, cyanheads/mcp-ts-core#172, cyanheads/mcp-ts-core#207).
  *   7. Bundle-content guard: `.mcpbignore` patterns must not strip critical
  *      runtime package paths (e.g. `node_modules/@opentelemetry/api/dist/`).
  *   8. Post-bundle content: a built `.mcpb` under `dist/` must contain zero
@@ -33,16 +34,19 @@
  *      all nested under `node_modules/` where root-anchored `.mcpbignore`
  *      patterns cannot reach: dependency-shipped agent docs at an installed
  *      package's root (`framework-skills/`, `skills/`, `.claude/`, `.agents/`,
- *      `AGENTS.md`, `CLAUDE.md`) and `SKILL.md` anywhere (issues #230/#794/#820),
- *      platform-specific native bindings (issue #274), node-gyp build output
- *      beside a `binding.gyp` (issue #783), and build-only package files —
- *      mcp-ts-core's `changelog/`, `config/`, `scripts/`, `templates/`,
+ *      `AGENTS.md`, `CLAUDE.md`) and `SKILL.md` anywhere
+ *      (cyanheads/mcp-ts-core#230, cyanheads/mcp-ts-core#794,
+ *      cyanheads/mcp-ts-core#820), platform-specific native bindings
+ *      (cyanheads/mcp-ts-core#274), node-gyp build output beside a
+ *      `binding.gyp` (cyanheads/mcp-ts-core#783), and build-only package
+ *      files — mcp-ts-core's `changelog/`, `config/`, `scripts/`, `templates/`,
  *      `biome.json`, `vitest.config.base.mjs`, better-sqlite3's `deps/` and
- *      `src/` (issue #791). Each class reports its count and a sample.
+ *      `src/` (cyanheads/mcp-ts-core#791). Each class reports its count and a
+ *      sample.
  *   9. Identity: `name`/`title` literals in `createApp()` /
  *      `createWorkerHandler()` (src/index.ts, src/worker.ts) and manifest
  *      `display_name` must equal the unscoped package name; a partial
- *      `name`/`title` pair warns without failing (issue #231).
+ *      `name`/`title` pair warns without failing (cyanheads/mcp-ts-core#231).
  *  10. Plugin marketplace manifests (`.claude-plugin/plugin.json`,
  *      `.codex-plugin/plugin.json`, `.codex-plugin/mcp.json`): non-empty
  *      descriptions, and identity/install correctness — display fields
@@ -51,14 +55,16 @@
  *      name (scoped if scoped). An unscoped install arg for a scoped package
  *      is a guaranteed install 404. Each present plugin manifest's `version`
  *      must equal `package.json`'s, so a release cannot ship stale plugin
- *      metadata (issue #393); `.codex-plugin/mcp.json` is connection config and
- *      carries no version. No server `env` value may be the empty string: the
+ *      metadata (cyanheads/mcp-ts-core#393); `.codex-plugin/mcp.json` is
+ *      connection config and carries no version. No server `env` value may be
+ *      the empty string: the
  *      client sets it on the child process, so the placeholder replaces a key
  *      the user exported and the framework then reads it as unset. Claude Code
  *      takes user values through `userConfig` + `${user_config.<key>}` (every
  *      reference must be declared); Codex forwards host variables named in
  *      `env_vars`. Gated by `devcheck.config.json` `packaging.pluginManifests`
- *      (default on); each manifest is skipped cleanly when absent (issue #240).
+ *      (default on); each manifest is skipped cleanly when absent
+ *      (cyanheads/mcp-ts-core#240).
  *      The Agent Plugins 1.0.0 root pair (`plugin.json` + `mcp.json`) is
  *      checked when root `plugin.json` is present. Codex, Cursor, and the
  *      other Agent Plugins clients reject the whole plugin when that manifest
@@ -76,7 +82,7 @@
  *      `.codex-plugin/plugin.json` `"mcpServers": "./.codex-plugin/mcp.json"`,
  *      so a missing overlay or pointer drops every forwarded variable without
  *      an error. A root `mcp.json` without root `plugin.json` is a
- *      client-config sample and is not checked (issue #426).
+ *      client-config sample and is not checked (cyanheads/mcp-ts-core#426).
  *  11. MCPB `user_config` wiring: every declared option is referenced from
  *      `mcp_config` as `${user_config.<key>}`, every reference is declared,
  *      `mcp_config` carries no other `${…}` placeholder besides the host's
@@ -87,13 +93,15 @@
  *      `README.md` must carry the `package.json` `version`. The badge is the
  *      package's headline version on GitHub and npmjs.com and ships in the
  *      tarball, so a half-finished bump is publicly visible. Skipped when the
- *      README, the badge, or the package version is absent (issue #418).
+ *      README, the badge, or the package version is absent
+ *      (cyanheads/mcp-ts-core#418).
  *  13. npm `files` excludes the built bundle: when `manifest.json` exists and
  *      `package.json` `files` covers `dist/` wholesale, it must also carry
  *      `"!dist/*.mcpb"`. The `bundle` script writes the `.mcpb` into `dist/`,
  *      so without the entry a release that bundles before publishing ships the
  *      server and its production dependencies inside the npm tarball
- *      (issue #469). Skipped when `manifest.json` or `files` is absent.
+ *      (cyanheads/mcp-ts-core#469). Skipped when `manifest.json` or `files` is
+ *      absent.
  *  14. manifest.json version parity: `version` must equal `package.json`'s, the
  *      same rule check 10 applies to the plugin manifests — the bundle's install
  *      dialog shows it. Skipped when `manifest.json` or the package version is
@@ -108,7 +116,8 @@
  *      publishes for either architecture — and the image publishes last, after
  *      npm and the MCP Registry. `HEALTHCHECK`/`CMD`/`ENTRYPOINT` run at
  *      container start and never count. One error per stage, naming each
- *      offending line (issue #575). Skipped when there is no `Dockerfile`.
+ *      offending line (cyanheads/mcp-ts-core#575). Skipped when there is no
+ *      `Dockerfile`.
  *  16. server.json npm launch shape: a registry client runs an npm entry as
  *      `npx <identifier>@<version> <packageArguments>` with the entry's
  *      `environmentVariables`, so the package's bin starts, never an npm
@@ -117,7 +126,7 @@
  *      `streamable-http` npm entry must fix `MCP_TRANSPORT_TYPE` as
  *      `"value": "http"` — absent, or only a user-editable `default`, the
  *      server starts on stdio. Runs with or without `manifest.json`; skipped
- *      when there is no `server.json` (issue #622).
+ *      when there is no `server.json` (cyanheads/mcp-ts-core#622).
  *  17. Published skills: when root `skills/` exists, the tree must load whole
  *      under the MCP SDK's strict skill loader (`validateSkillTree` from
  *      `@cyanheads/mcp-ts-core/linter`: the Agent Skills frontmatter rules,
@@ -129,7 +138,7 @@
  *      `metadata.audience: external` (the framework-managed marker). No
  *      `.mcpbignore` pattern may strip a file of the tree — a pre-0.13
  *      `.mcpbignore` still carries `/skills/`. Skipped, `.mcpbignore` included,
- *      when there is no root `skills/` (issue #429).
+ *      when there is no root `skills/` (cyanheads/mcp-ts-core#429).
  *
  * Every check skips cleanly when its input is absent — consumers who deleted
  * `manifest.json` for an HTTP-only deploy, or who haven't built a bundle,

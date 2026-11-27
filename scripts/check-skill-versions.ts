@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 /**
- * @fileoverview Enforces the skill-versioning policy (#98 → #99): a change to a
- * `framework-skills/<name>/SKILL.md` body must bump `metadata.version` in the same edit.
+ * @fileoverview Enforces the skill-versioning policy (cyanheads/mcp-ts-core#98 →
+ * cyanheads/mcp-ts-core#99): a change to a `framework-skills/<name>/SKILL.md`
+ * body must bump `metadata.version` in the same edit.
  * Documenting the policy made the expectation visible; this check makes it stick.
  * The triggering incident was 7 missed bumps across 2 consecutive releases — the
  * kind of low-salience checklist item that needs tooling, not vigilance.
