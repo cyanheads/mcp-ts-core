@@ -40,6 +40,7 @@ import {
   createRequestInput,
   declaredResponses,
   isInputRequiredSignal,
+  readSignal,
 } from '@/mcp-server/inputRequired.js';
 import { fromProtocolError, urlElicitationHandback } from '@/mcp-server/protocolError.js';
 import { parseToolArguments } from '@/mcp-server/tools/utils/arguments/index.js';
@@ -562,14 +563,25 @@ export interface RunToolContractOptions {
  *
  * Arguments that fail the `input` schema are rejected through
  * `parseToolArguments` — the same call the production handler factory makes —
- * so the envelope is `InvalidParams` (`-32602`) with the tool-naming message a
- * client receives, not a `ValidationError` the wire never carries. An output
- * that breaks the `output` or `enrichment` schema fails as the factory's
- * `InternalError` (`-32603`) naming that contract. An SDK `ProtocolError` the
- * handler throws keeps its code, message, and object `data`, as in production,
- * except a URL elicitation (`-32042`): production hands that back to the SDK
- * as a protocol error, so the runner rejects with the `ProtocolError`
- * production hands back, minus `data.requestId`.
+ * and resolved against the definition's `errors[]` as the factory resolves
+ * them, so the envelope is `InvalidParams` (`-32602`) with the tool-naming
+ * message a client receives, not a `ValidationError` the wire never carries.
+ * An output that breaks the `output` or `enrichment` schema fails as the
+ * factory's `InternalError` (`-32603`) naming that contract. An SDK
+ * `ProtocolError` the handler throws keeps its code, message, and object
+ * `data`, as in production, except a URL elicitation (`-32042`): production
+ * hands that back to the SDK as a protocol error, so the runner rejects with
+ * the `ProtocolError` production hands back, minus `data.requestId`.
+ *
+ * A `ctx.requestInput(...)` round is no failure and no `CallToolResult`:
+ * production returns its `input_required` result, so the runner rejects with
+ * the input-required signal, whose `result` is that value — on an aborted
+ * `context.signal` too, as production returns it there. Assert a round with
+ * {@link expectInputRequired} around this call. Its `requestState` stays the
+ * handler's own value: the runner seals nothing, whatever
+ * `MCP_REQUEST_STATE_KEY` holds. A thrown value that passes the signal's brand
+ * check but whose `result` cannot be read fails as the factory's
+ * `InternalError` (`-32603`) instead.
  *
  * A cancellation settles as it does in production: once `context.signal` has
  * fired, the call returns `RequestCancelled` (`-32011`) whether the handler
@@ -593,7 +605,9 @@ export async function runToolContract<TDefinition extends AnyToolDefinition>(
   try {
     validatedInput = parseToolArguments(definition, input);
   } catch (error) {
-    return classifyAndBuildToolErrorResult(error);
+    // Resolved against `errors[]` as the factory resolves every failure it reports (#856).
+    const { failure } = resolveDeclaredFailure(definition.errors, error);
+    return classifyAndBuildToolErrorResult(failure);
   }
 
   try {
@@ -607,11 +621,20 @@ export async function runToolContract<TDefinition extends AnyToolDefinition>(
       validatedOutput,
       renderToolContent(definition, validatedOutput, ctx),
     );
-  } catch (error) {
-    const { failure } = resolveDeclaredFailure(
-      definition.errors,
-      asRequestCancelled(fromProtocolError(error), ctx.signal),
+  } catch (thrown) {
+    /**
+     * As in the factory: the input-required signal leaves through the guarded
+     * read of its `result` (the runner seals nothing), an SDK `ProtocolError`
+     * as the `McpError` it stands for, and the cancellation settle exempts the
+     * signal.
+     */
+    const error = asRequestCancelled(
+      isInputRequiredSignal(thrown) ? readSignal(thrown) : fromProtocolError(thrown),
+      ctx.signal,
     );
+    // Control flow, not a failure: production returns its `input_required` result (#667).
+    if (isInputRequiredSignal(error)) throw error;
+    const { failure } = resolveDeclaredFailure(definition.errors, error);
     const handback = urlElicitationHandback(failure);
     if (handback) throw handback;
     return classifyAndBuildToolErrorResult(failure);
@@ -653,23 +676,32 @@ export function createInMemoryStorage(options?: InMemoryProviderOptions): Storag
  * Runs a handler and returns the `input_required` result it asked for.
  *
  * `ctx.requestInput(...)` never returns — it throws a control-flow signal the
- * handler factory converts into the protocol result — so a direct unit test of
- * a multi-round-trip handler has to catch it. Drive the next round by feeding
- * the answers back through `createMockContext({ inputResponses, requestState })`.
+ * handler factory converts into the protocol result — so a unit test of a
+ * multi-round-trip handler has to catch it. {@link runToolContract} lets the
+ * same signal propagate, so wrapping it asserts the round through the contract
+ * boundary, as wrapping `definition.handler(input, ctx)` asserts it against the
+ * handler alone. Drive the next round by feeding the answers back as
+ * `inputResponses` and `requestState` — `runToolContract`'s `context`, or
+ * `createMockContext` for a direct handler call.
  *
  * @throws When the handler returned normally or failed for any other reason —
  *   the original error propagates untouched.
  *
  * @example
  * ```ts
- * const asked = await expectInputRequired(() => deleteTool.handler({ path }, ctx));
- * expect(asked.inputRequests?.confirm?.method).toBe('elicitation/create');
+ * const asked = await expectInputRequired(() => runToolContract(exportReport, { reportId }));
+ * expect(asked.inputRequests?.format?.method).toBe('elicitation/create');
  *
- * const answered = createMockContext({
- *   inputResponses: { confirm: { action: 'accept', content: { ok: true } } },
- *   requestState: asked.requestState,
+ * const answered = await runToolContract(exportReport, { reportId }, {
+ *   context: {
+ *     inputResponses: { format: { action: 'accept', content: { format: 'csv' } } },
+ *     requestState: asked.requestState,
+ *   },
  * });
- * expect(await deleteTool.handler({ path }, answered)).toEqual({ deleted: true });
+ * expect(answered.structuredContent).toMatchObject({ format: 'csv' });
+ *
+ * // The same round against the handler alone
+ * await expectInputRequired(() => exportReport.handler(input, createMockContext()));
  * ```
  */
 export async function expectInputRequired(run: () => unknown): Promise<InputRequiredResult> {

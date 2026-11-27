@@ -5,6 +5,7 @@
 import fc from 'fast-check';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
+import { isOutputContractViolation } from '@/mcp-server/outputContract.js';
 import { prompt } from '@/mcp-server/prompts/utils/promptDefinition.js';
 import { resource } from '@/mcp-server/resources/utils/resourceDefinition.js';
 import { tool } from '@/mcp-server/tools/utils/toolDefinition.js';
@@ -327,6 +328,98 @@ describe('fuzz output contracts', () => {
         numAdversarial: phase === 'adversarial' ? 1 : 0,
       });
       expect(report.crashes).toHaveLength(1);
+    },
+  );
+});
+
+/**
+ * The input schema and run counts that route a tool's handler through one
+ * `fuzzTool` phase. A required `value` of any type admits nearly every
+ * generated and adversarial record but none of the raw top-level payloads; an
+ * open empty object admits only those. Every run also ends with one aborted
+ * replay, which parses no output and records no crash.
+ */
+const toolPhases = {
+  valid: { numRuns: 2, numAdversarial: 0 },
+  adversarial: { numRuns: 0, numAdversarial: 3 },
+  raw: { numRuns: 0, numAdversarial: 0 },
+} as const;
+const phaseInput = (phase: keyof typeof toolPhases) =>
+  phase === 'raw'
+    ? z.object({}).passthrough()
+    : z.object({ value: z.any().nonoptional().describe('Value') });
+
+// Issue #667 — a handler's input-required signal is a completed call, never a crash.
+describe('fuzz input-required rounds', () => {
+  it.each(['valid', 'adversarial', 'raw'] as const)(
+    'counts a tool handler that requests input as a completed call in the %s phase',
+    async (phase) => {
+      let calls = 0;
+      const definition = tool('fuzz_ask', {
+        description: 'Asks for input on every call.',
+        input: phaseInput(phase),
+        output,
+        handler(_input, ctx) {
+          calls++;
+          return ctx.requestInput({ requestState: 'r1' });
+        },
+      });
+      const report = await fuzzTool(definition, { ...options, ...toolPhases[phase] });
+      expect(calls).toBeGreaterThan(1);
+      expect(report.crashes).toEqual([]);
+      expect(report.leaks).toEqual([]);
+    },
+  );
+
+  it.each(['valid', 'adversarial', 'no-params'] as const)(
+    'counts a resource handler that requests input as a completed call in the %s phase',
+    async (phase) => {
+      let calls = 0;
+      const definition = resource('fuzz://ask', {
+        description: 'Asks for input on every read.',
+        ...(phase !== 'no-params' && { params: z.object({ value: z.any().describe('Value') }) }),
+        handler(_params, ctx) {
+          calls++;
+          return ctx.requestInput({ requestState: 'r1' });
+        },
+      });
+      const report = await fuzzResource(definition, {
+        ...options,
+        numRuns: phase === 'adversarial' ? 0 : 1,
+        numAdversarial: phase === 'adversarial' ? 3 : 0,
+      });
+      expect(calls).toBe(phase === 'adversarial' ? 3 : 1);
+      expect(report.crashes).toEqual([]);
+      expect(report.leaks).toEqual([]);
+    },
+  );
+});
+
+// Issue #667 — `fuzzTool` parses a handler's return as production does, so a
+// success carrying the reserved top-level `error` key is the definition's bug.
+describe('fuzz reserved output keys', () => {
+  it.each(['valid', 'adversarial', 'raw'] as const)(
+    'records an open-root output carrying a top-level error key as a crash in the %s phase',
+    async (phase) => {
+      let calls = 0;
+      const definition = tool('fuzz_error_key', {
+        description: 'Returns a success carrying the reserved error key.',
+        input: phaseInput(phase),
+        output: output.passthrough(),
+        handler() {
+          calls++;
+          return { ok: true, error: 'boom' };
+        },
+      });
+      const report = await fuzzTool(definition, { ...options, ...toolPhases[phase] });
+      expect(calls).toBeGreaterThan(1);
+      expect(report.crashes).toHaveLength(calls - 1);
+      for (const { error } of report.crashes) {
+        expect(isOutputContractViolation(error)).toBe(true);
+        expect(error).toMatchObject({
+          message: expect.stringContaining('Reserved for the failure envelope'),
+        });
+      }
     },
   );
 });

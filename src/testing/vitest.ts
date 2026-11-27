@@ -121,10 +121,12 @@ export const mcpTest = test.extend<McpTestFixtures>({
 /**
  * One schema-valid success case for {@link toolContractSuite}.
  *
- * The suite always checks the shared contract (no `isError`, structured output
- * matching the declared schema, non-empty content). Add `expected` for a
- * structured-output subset, or `assert` for richer content/enrichment
- * expectations, so the case pins behavior rather than shape alone.
+ * The suite always checks the shared contract: a success result, whose output
+ * `runToolContract` parsed against `output` and whose enrichment it parsed
+ * against `enrichment`, as production parses them, with non-empty content. Add
+ * `expected` for a structured-output subset, or `assert` for richer
+ * content/enrichment expectations, so the case pins behavior rather than shape
+ * alone.
  */
 export interface ToolContractSuccessCase<TDefinition extends AnyToolDefinition> {
   /** Behavior-specific assertions after the shared contract checks pass. */
@@ -177,7 +179,9 @@ function mergeContextOptions(
  * Successful cases must survive input parsing, handler invocation, output
  * parsing, and content formatting. Error cases must return the framework's
  * dual-surface error envelope (`content[]` plus `structuredContent.error`) with
- * the expected code and optional contract reason.
+ * the expected code and optional contract reason. A handler that requests
+ * input fails either kind: `runToolContract` rejects with that round, which
+ * `expectInputRequired` from `/testing` asserts.
  *
  * @example
  * ```ts
@@ -204,8 +208,8 @@ export function toolContractSuite<TDefinition extends AnyToolDefinition>(
           ...(context && { context }),
         });
 
+        // `runToolContract` already parsed the output and the enrichment as production does.
         expect(result.isError).not.toBe(true);
-        expect(result.structuredContent).toEqual(expect.schemaMatching(definition.output));
         expect(result.content).toEqual(expect.arrayContaining([expect.objectContaining({})]));
         if (successCase.expected !== undefined) {
           expect(result.structuredContent).toMatchObject(successCase.expected);

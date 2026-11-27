@@ -13,6 +13,7 @@ import {
   declaredResponses,
   InputRequiredSignal,
   isInputRequiredSignal,
+  sealSignal,
 } from '@/mcp-server/inputRequired.js';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 
@@ -268,5 +269,28 @@ describe('createRequestStateSealer (MCP_REQUEST_STATE_KEY)', () => {
     const sealed = (await minter?.seal(asking, anonymous))?.requestState as string;
 
     await expect(verifier?.verify(sealed, anonymous)).resolves.toBe('consent/abc');
+  });
+
+  // #701 — a signal whose `result` throws on read fails as an unreadable signal,
+  // never as a failed seal, and the sealer is never handed anything to seal.
+  it('fails a signal whose result cannot be read before the sealer sees it', async () => {
+    const sealer = createRequestStateSealer(KEY);
+    if (!sealer) throw new Error('expected a sealer');
+    const seal = vi.spyOn(sealer, 'seal');
+    const unreadable = {
+      isInputRequiredSignal: true,
+      get result(): never {
+        throw new Error('result is unreadable');
+      },
+    } as unknown as InputRequiredSignal;
+
+    const out = await sealSignal(unreadable, sealer, anonymous);
+
+    expect(out).toBeInstanceOf(McpError);
+    expect(out).toMatchObject({
+      code: JsonRpcErrorCode.InternalError,
+      message: 'Could not read the result of an input_required signal.',
+    });
+    expect(seal).not.toHaveBeenCalled();
   });
 });

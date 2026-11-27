@@ -7,6 +7,7 @@ import fc from 'fast-check';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
+import { isOutputContractViolation } from '@/mcp-server/outputContract.js';
 import { prompt } from '@/mcp-server/prompts/utils/promptDefinition.js';
 import { resource } from '@/mcp-server/resources/utils/resourceDefinition.js';
 import { tool } from '@/mcp-server/tools/utils/toolDefinition.js';
@@ -362,7 +363,12 @@ describe('fuzzTool failure accounting', () => {
     const report = await fuzzTool(definition, { numRuns: 0, numAdversarial: 0, seed: 54 });
 
     expect(report.crashes).toHaveLength(2);
-    expect(report.crashes.every((crash) => crash.error instanceof z.ZodError)).toBe(true);
+    // Parsed as production parses it: the output-contract InternalError, not a raw ZodError.
+    expect(report.crashes.every((crash) => isOutputContractViolation(crash.error))).toBe(true);
+    expect(report.crashes[0]?.error).toMatchObject({
+      code: JsonRpcErrorCode.InternalError,
+      message: expect.stringContaining('fuzz_raw_bad_output returned output that does not match'),
+    });
   });
 
   it('detects and removes Object.prototype pollution introduced by a handler', async () => {

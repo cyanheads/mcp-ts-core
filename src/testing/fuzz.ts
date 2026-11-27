@@ -23,6 +23,7 @@ import {
   ZodString,
   ZodUnion,
 } from 'zod';
+import { isInputRequiredSignal } from '@/mcp-server/inputRequired.js';
 import { isOutputContractViolation } from '@/mcp-server/outputContract.js';
 import type { AnyPromptDefinition } from '@/mcp-server/prompts/utils/promptDefinition.js';
 import type { AnyResourceDefinition } from '@/mcp-server/resources/utils/resourceDefinition.js';
@@ -31,7 +32,7 @@ import type {
   AnyToolDefinition,
   ToolInputSchema,
 } from '@/mcp-server/tools/utils/toolDefinition.js';
-import { buildToolSuccessResult } from '@/mcp-server/tools/utils/toolResult.js';
+import { buildToolSuccessResult, parseToolOutput } from '@/mcp-server/tools/utils/toolResult.js';
 import { McpError } from '@/types-global/errors.js';
 import { createMockContext, type MockContextOptions } from './index.js';
 
@@ -580,9 +581,12 @@ function recordLeak(report: FuzzReport, input: unknown, error: unknown): void {
 /**
  * A crash is any throw that is not a well-formed `McpError` — plus a broken
  * output or enrichment contract, which the framework now raises as an
- * `McpError` (`InternalError`) but which is still the definition's bug.
+ * `McpError` (`InternalError`) but which is still the definition's bug. A
+ * handler's input-required signal is neither: production returns its
+ * `input_required` result, so the call completed (#667).
  */
 function recordHandlerError(report: FuzzReport, input: unknown, error: unknown): void {
+  if (isInputRequiredSignal(error)) return;
   if (!(error instanceof McpError) || isOutputContractViolation(error)) {
     report.crashes.push({ input, error });
   }
@@ -650,7 +654,7 @@ export interface FuzzReport {
  * Designed to be called inside a `describe()` / `it()` block.
  *
  * Checks:
- * 1. Valid inputs -> handler returns schema-valid output or a well-formed MCP error
+ * 1. Valid inputs -> handler returns schema-valid output, requests input, or a well-formed MCP error
  * 2. Adversarial inputs -> Zod rejects or handler errors gracefully
  * 3. No prototype pollution on Object.prototype
  * 4. No stack trace / path leaks in error messages
@@ -704,7 +708,7 @@ export async function fuzzTool(
       const ctx = createDefinitionFuzzContext(def, options);
       try {
         const result = await withTimeout(def.handler(parsed.data, ctx), timeout);
-        buildToolSuccessResult(def, ctx, def.output.parse(result), []);
+        buildToolSuccessResult(def, ctx, parseToolOutput(def, result), []);
       } catch (err) {
         recordHandlerError(report, parsed.data, err);
       }
@@ -722,7 +726,7 @@ export async function fuzzTool(
         const validated = def.input.safeParse(input);
         if (!validated.success) return;
         const result = await withTimeout(def.handler(validated.data, ctx), timeout);
-        buildToolSuccessResult(def, ctx, def.output.parse(result), []);
+        buildToolSuccessResult(def, ctx, parseToolOutput(def, result), []);
       } catch (err) {
         recordHandlerError(report, input, err);
       }
@@ -749,7 +753,7 @@ export async function fuzzTool(
       if (!validated.success) continue;
       const ctx = createDefinitionFuzzContext(def, options);
       const result = await withTimeout(def.handler(validated.data, ctx), timeout);
-      buildToolSuccessResult(def, ctx, def.output.parse(result), []);
+      buildToolSuccessResult(def, ctx, parseToolOutput(def, result), []);
     } catch (err) {
       recordHandlerError(report, input, err);
     }

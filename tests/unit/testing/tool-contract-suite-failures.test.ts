@@ -30,6 +30,7 @@ vi.mock('vitest', async (importOriginal) => {
   return { ...actual, describe, test };
 });
 
+import { isInputRequiredSignal } from '@/mcp-server/inputRequired.js';
 import { tool } from '@/mcp-server/tools/utils/toolDefinition.js';
 import { toolContractSuite } from '@/testing/vitest.js';
 import { JsonRpcErrorCode } from '@/types-global/errors.js';
@@ -123,6 +124,39 @@ toolContractSuite(
   { success: [{ name: 'silent: success with no content', input: {} }] },
 );
 
+// Issue #668 — with no re-parse of its own, a success case still fails on an
+// output that breaks `output`, through the error result `runToolContract` returns.
+toolContractSuite(
+  tool('suite_failure_bad_output', {
+    description: 'Returns output that breaks its own schema.',
+    input: z.object({}),
+    output: z.object({ ok: z.boolean().describe('Success') }),
+    handler: () => ({ ok: 'yes' }) as never,
+  }),
+  { success: [{ name: 'bad output: success whose output breaks the schema', input: {} }] },
+);
+
+// Issue #667 — an input-required round is neither a success nor an error
+// envelope: the signal escapes `runToolContract`, so both case kinds fail.
+toolContractSuite(
+  tool('suite_failure_ask', {
+    description: 'Asks for input on every call.',
+    input: z.object({}),
+    output: z.object({ ok: z.boolean().describe('Never returned.') }),
+    handler: (_input, ctx) => ctx.requestInput({ requestState: 'r1' }),
+  }),
+  {
+    success: [{ name: 'ask: success whose handler requests input', input: {} }],
+    errors: [
+      {
+        name: 'ask: InternalError case whose handler requests input',
+        input: {},
+        code: JsonRpcErrorCode.InternalError,
+      },
+    ],
+  },
+);
+
 toolContractSuite(
   tool('suite_failure_context', {
     description: 'Reports the request and tenant identity it ran under.',
@@ -178,6 +212,18 @@ describe('toolContractSuite success cases', () => {
     });
   });
 
+  it('fail when the output breaks the declared schema', async () => {
+    expect(await failureOf('bad output: success whose output breaks the schema')).toBeInstanceOf(
+      Error,
+    );
+  });
+
+  it('fail with the signal when the handler requests input', async () => {
+    expect(await failureOf('ask: success whose handler requests input')).toSatisfy(
+      isInputRequiredSignal,
+    );
+  });
+
   it('run under the shared context, merged with the case context', async () => {
     expect(await failureOf('context: shared context alone')).toBeUndefined();
     expect(await failureOf('context: shared context merged with the case context')).toBeUndefined();
@@ -203,5 +249,11 @@ describe('toolContractSuite error cases', () => {
     expect(await failureOf('echo: error with another reason')).toMatchObject({
       message: expect.stringContaining('not_the_reason'),
     });
+  });
+
+  it('fail with the signal when the handler requests input', async () => {
+    expect(await failureOf('ask: InternalError case whose handler requests input')).toSatisfy(
+      isInputRequiredSignal,
+    );
   });
 });

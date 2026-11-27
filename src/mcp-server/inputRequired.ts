@@ -506,15 +506,28 @@ export function createRequestStateSealer(key: string | undefined): RequestStateS
 }
 
 /**
+ * The input-required signal a handler threw, rebuilt around its `result`, read
+ * once and guarded: a value that passes the brand check can still throw on that
+ * read, and the factories return the rethrown signal's `result` outside any
+ * catch, where a throw would leave with no error envelope and no request id
+ * (#701). An unreadable `result` resolves to an `InternalError`, as a failed
+ * mint in {@link sealSignal} does. Called only for a value
+ * {@link isInputRequiredSignal} accepts.
+ */
+export function readSignal(signal: InputRequiredSignal): InputRequiredSignal | McpError {
+  try {
+    return new InputRequiredSignal(signal.result);
+  } catch (error) {
+    return internalError('Could not read the result of an input_required signal.', undefined, {
+      cause: error,
+    });
+  }
+}
+
+/**
  * What a handler factory rethrows for the input-required signal its handler
- * threw: a signal carrying its `requestState` sealed when `sealer` is
- * configured, else its `result` unchanged.
- *
- * `result` is read once, guarded, and the signal rebuilt around the value read:
- * a value that passes the brand check can still throw on that read, and the
- * factories return the rethrown signal's `result` outside any catch, where a
- * throw would leave with no error envelope and no request id (#701). An
- * unreadable `result` resolves to an `InternalError`, as a failed mint does.
+ * threw: the signal {@link readSignal} rebuilds, its `requestState` sealed when
+ * `sealer` is configured, else its `result` unchanged.
  *
  * The factories call it inside the measured region, where the signal is
  * rethrown, and only for a value {@link isInputRequiredSignal} accepts: any
@@ -534,17 +547,10 @@ export async function sealSignal(
   sealer: RequestStateSealer | undefined,
   ctx: ServerContext,
 ): Promise<InputRequiredSignal | McpError> {
-  let result: InputRequiredResult;
+  const read = readSignal(signal);
+  if (sealer === undefined || read instanceof McpError) return read;
   try {
-    result = signal.result;
-  } catch (error) {
-    return internalError('Could not read the result of an input_required signal.', undefined, {
-      cause: error,
-    });
-  }
-  if (sealer === undefined) return new InputRequiredSignal(result);
-  try {
-    return new InputRequiredSignal(await sealer.seal(result, ctx));
+    return new InputRequiredSignal(await sealer.seal(read.result, ctx));
   } catch (error) {
     return internalError(
       'Could not seal the requestState of an input_required result.',

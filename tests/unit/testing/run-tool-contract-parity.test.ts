@@ -11,6 +11,7 @@
 
 import {
   type CallToolResult,
+  inputRequired,
   ProtocolError,
   ResourceNotFoundError,
   UrlElicitationRequiredError,
@@ -25,7 +26,7 @@ import {
   type HandlerServices,
   type NotifierSources,
 } from '@/mcp-server/tools/utils/toolHandlerFactory.js';
-import { runToolContract } from '@/testing/index.js';
+import { expectInputRequired, runToolContract } from '@/testing/index.js';
 import { JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { withRetry } from '@/utils/network/retry.js';
 import { makeServerContext } from '../../helpers/server-context.js';
@@ -349,6 +350,55 @@ describe('runToolContract declared recovery fill', () => {
   });
 });
 
+// Issue #856 — a service throw carrying a declared reason gets the entry's
+// retryable in the helper exactly as in production.
+describe('runToolContract declared retryable fill', () => {
+  /** `upstream_unavailable`, produced by the service, declaring `retryable` as given. */
+  const contract = (retryable: boolean | undefined) => [
+    {
+      reason: 'upstream_unavailable',
+      code: JsonRpcErrorCode.ServiceUnavailable,
+      when: 'The upstream returned 503.',
+      recovery: 'The upstream is temporarily down; retry the call in a minute.',
+      ...(retryable !== undefined && { retryable }),
+      thrownBy: 'service' as const,
+    },
+  ];
+
+  it.each([
+    ['an entry’s true, no throw-site hint', true, {}, true],
+    [
+      'an entry’s false beside a throw-site hint',
+      false,
+      { recovery: { hint: 'Retry once the upstream is back.' } },
+      false,
+    ],
+    ['a throw-site true over an entry’s false', false, { retryable: true }, true],
+    ['a throw-site false over an entry’s true', true, { retryable: false }, false],
+    ['an entry declaring none', undefined, {}, undefined],
+  ])('publishes the production envelope for %s', async (_label, declared, extra, expected) => {
+    const definition = tool('parity_retryable', {
+      description: 'Fails in its service.',
+      input: z.object({}),
+      output: z.object({ ok: z.boolean().describe('Never returned.') }),
+      errors: contract(declared),
+      handler: () => {
+        throw new McpError(JsonRpcErrorCode.ServiceUnavailable, 'Upstream returned 503.', {
+          reason: 'upstream_unavailable',
+          ...extra,
+        });
+      },
+    }) as AnyToolDefinition;
+
+    const production = await viaFactory(definition, {});
+    const helper = await runToolContract(definition, {} as never);
+
+    // Anchor the comparison on what the factory published.
+    expect(envelope(production).data?.retryable).toBe(expected);
+    expect(helper).toEqual(production);
+  });
+});
+
 // Issue #480 — the framework's own output-contract parses fail as the server
 // fault they are, in the helper exactly as in production.
 describe('runToolContract output-contract violations', () => {
@@ -570,4 +620,172 @@ describe('runToolContract cancellation', () => {
     expect(envelope(helper).data?.reason).toBe('invalid_arguments');
     expect(helper).toEqual(production);
   });
+});
+
+// Issue #667 — `ctx.requestInput` is protocol control flow, not a failure. The
+// helper rejects with the signal, so `expectInputRequired` around it returns
+// exactly the `input_required` result the factory returns.
+describe('runToolContract input-required round', () => {
+  const Format = z.object({ format: z.enum(['json', 'csv']).describe('Output format') });
+  const neverReturned = z.object({ ok: z.boolean().describe('Never returned.') });
+
+  const stateOnly = tool('parity_ask_state', {
+    description: 'Asks with a requestState only.',
+    input: z.object({}),
+    output: neverReturned,
+    handler: (_input, ctx) => ctx.requestInput({ requestState: 'r1' }),
+  }) as AnyToolDefinition;
+
+  const cases: Array<{
+    definition: AnyToolDefinition;
+    name: string;
+    signal?: () => AbortSignal;
+  }> = [
+    {
+      name: 'a request with inputRequests',
+      definition: tool('parity_ask_elicit', {
+        description: 'Asks for a format.',
+        input: z.object({}),
+        output: neverReturned,
+        handler: (_input, ctx) =>
+          ctx.requestInput({
+            inputRequests: {
+              format: inputRequired.elicit({ message: 'What format?', requestedSchema: Format }),
+            },
+            requestState: 'round-1',
+          }),
+      }) as AnyToolDefinition,
+    },
+    { name: 'a request with requestState only', definition: stateOnly },
+    {
+      name: 'a request made after ctx.enrich and ctx.content',
+      definition: tool('parity_ask_enriched', {
+        description: 'Enriches and emits media, then asks.',
+        input: z.object({}),
+        output: neverReturned,
+        enrichment: { note: z.string().optional().describe('Note') },
+        handler(_input, ctx) {
+          ctx.enrich({ note: 'collected' });
+          ctx.content.image('aW1hZ2U=', 'image/png');
+          return ctx.requestInput({
+            inputRequests: {
+              format: inputRequired.elicit({ message: 'What format?', requestedSchema: Format }),
+            },
+            requestState: 'round-1',
+          });
+        },
+      }) as AnyToolDefinition,
+    },
+    {
+      name: 'a request on an aborted signal',
+      definition: stateOnly,
+      signal: () => AbortSignal.abort('client disconnected'),
+    },
+    {
+      name: 'a definition declaring errors[]',
+      definition: tool('parity_ask_contract', {
+        description: 'Declares a failure, then asks.',
+        input: z.object({}),
+        output: neverReturned,
+        errors: [
+          {
+            reason: 'unavailable',
+            code: JsonRpcErrorCode.ServiceUnavailable,
+            when: 'The upstream is down.',
+            recovery: 'Wait a minute for the upstream, then call again.',
+          },
+        ],
+        handler: (_input, ctx) => ctx.requestInput({ requestState: 'r1' }),
+      }) as AnyToolDefinition,
+    },
+  ];
+
+  for (const { definition, name, signal } of cases) {
+    it(`returns the production result for ${name}`, async () => {
+      const production = await createToolHandler(
+        definition,
+        services,
+        notifiers,
+      )({}, makeServerContext(signal ? { signal: signal() } : {}));
+      const helper = await expectInputRequired(() =>
+        runToolContract(definition, {} as never, signal ? { context: { signal: signal() } } : {}),
+      );
+
+      expect(production).toMatchObject({ resultType: 'input_required' });
+      expect(helper).toStrictEqual(production);
+    });
+  }
+
+  /** Throws a value that passes the signal's brand check but whose `result` cannot be read. */
+  const unreadable = tool('parity_ask_unreadable', {
+    description: 'Throws an unreadable input-required signal.',
+    input: z.object({}),
+    output: neverReturned,
+    handler: () => {
+      throw {
+        isInputRequiredSignal: true,
+        get result(): never {
+          throw new Error('result is unreadable');
+        },
+      };
+    },
+  }) as AnyToolDefinition;
+
+  it('publishes the production InternalError for a signal whose result cannot be read', async () => {
+    const production = await viaFactory(unreadable, {});
+    const helper = await runToolContract(unreadable, {} as never);
+
+    expect(envelope(production)).toEqual({
+      code: JsonRpcErrorCode.InternalError,
+      message: 'Could not read the result of an input_required signal.',
+    });
+    expect(helper).toEqual(production);
+  });
+
+  it('settles a signal whose result cannot be read on an aborted signal as production does', async () => {
+    const production = withoutRequestId(
+      (await createToolHandler(
+        unreadable,
+        services,
+        notifiers,
+      )({}, makeServerContext({ signal: AbortSignal.abort() }))) as CallToolResult,
+    );
+    const helper = await runToolContract(unreadable, {} as never, {
+      context: { signal: AbortSignal.abort() },
+    });
+
+    expect(envelope(production).code).toBe(JsonRpcErrorCode.RequestCancelled);
+    expect(helper).toEqual(production);
+  });
+});
+
+// Issue #856 — an argument rejection reaches its envelope through the same
+// declared-failure resolution in the helper as in the factory.
+describe('runToolContract argument rejection under a declared invalid_arguments entry', () => {
+  it.each([true, false])(
+    'publishes the production envelope for an entry with retryable: %s',
+    async (retryable) => {
+      const definition = tool('parity_declared_arguments', {
+        description: 'Declares the argument-rejection reason.',
+        input: z.object({ n: z.number().int().min(1000).describe('A large integer') }),
+        output: z.object({ n: z.number().describe('The echoed integer') }),
+        errors: [
+          {
+            reason: 'invalid_arguments',
+            code: JsonRpcErrorCode.InvalidParams,
+            retryable,
+            when: 'The arguments fail the input schema.',
+            recovery: 'Send an integer of at least 1000 and call again.',
+          },
+        ],
+        handler: ({ n }) => ({ n }),
+      }) as AnyToolDefinition;
+
+      const production = await viaFactory(definition, { n: 5 });
+      const helper = await runToolContract(definition, { n: 5 } as never);
+
+      expect(envelope(production).data?.reason).toBe('invalid_arguments');
+      expect(helper).toEqual(production);
+    },
+  );
 });
