@@ -3,8 +3,8 @@
  * @module tests/resources/echo.resource.test
  */
 
-import { describe, expect, it } from 'vitest';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { describe, expect, it } from 'vitest';
 import { echoResource } from '@/mcp-server/resources/definitions/echo.resource.js';
 
 describe('echoResource', () => {

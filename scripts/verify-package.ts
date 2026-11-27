@@ -899,6 +899,7 @@ const SCAFFOLD_DEVCHECK_STATUS: Readonly<Record<string, DevcheckStatus>> = {
   'Skills Sync': 'PASSED',
   'Skill Versions': 'PASSED',
   'Changelog Sync': 'PASSED',
+  Biome: 'PASSED',
   TypeScript: 'PASSED',
   'TypeScript (Worker)': 'SKIPPED',
   Tests: 'SKIPPED',
@@ -906,12 +907,6 @@ const SCAFFOLD_DEVCHECK_STATUS: Readonly<Record<string, DevcheckStatus>> = {
   'Security Audit': 'SKIPPED',
   'Dependencies (Outdated)': 'SKIPPED',
 };
-
-/** Steps that must appear in the summary but whose status is not asserted. */
-const SCAFFOLD_DEVCHECK_UNASSERTED = new Set([
-  // A fresh scaffold fails Biome today: its templates are not Biome-clean (#557).
-  'Biome',
-]);
 
 /** Replaces the one occurrence of `search` in the file at `path`, or throws naming the count. */
 async function replaceOnce(path: string, search: string, replacement: string): Promise<void> {
@@ -1059,11 +1054,8 @@ async function verifyScaffoldDevcheck(
       mismatches.push({ name, detail: `expected ${expected}, got ${actual}` });
     }
   }
-  for (const name of SCAFFOLD_DEVCHECK_UNASSERTED) {
-    if (!rows.has(name)) mismatches.push({ name, detail: 'no summary row' });
-  }
   for (const [name, row] of rows) {
-    if (!Object.hasOwn(SCAFFOLD_DEVCHECK_STATUS, name) && !SCAFFOLD_DEVCHECK_UNASSERTED.has(name)) {
+    if (!Object.hasOwn(SCAFFOLD_DEVCHECK_STATUS, name)) {
       mismatches.push({ name, detail: `unexpected step, got ${row.status}` });
     }
   }

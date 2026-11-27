@@ -44,11 +44,7 @@
     "start:stdio": "MCP_TRANSPORT_TYPE=stdio node dist/index.js",
     "start:http": "MCP_TRANSPORT_TYPE=http node dist/index.js"
   },
-  "keywords": [
-    "mcp",
-    "mcp-server",
-    "model-context-protocol"
-  ],
+  "keywords": ["mcp", "mcp-server", "model-context-protocol"],
   "repository": {
     "type": "git",
     "url": ""

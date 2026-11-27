@@ -5,9 +5,9 @@
 
 import type { HandlerContext, ReasonOf } from '@cyanheads/mcp-ts-core';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
-import { describe, expect, it } from 'vitest';
 import { createMockContext, getEnrichment } from '@cyanheads/mcp-ts-core/testing';
 import { mcpTest } from '@cyanheads/mcp-ts-core/testing/vitest';
+import { describe, expect, it } from 'vitest';
 import { echoTool } from '@/mcp-server/tools/definitions/echo.tool.js';
 
 /**
