@@ -4,7 +4,7 @@ description: >
   Scaffold a new MCP tool definition. Use when the user asks to add a tool, create a new tool, or implement a new capability for the server.
 metadata:
   author: cyanheads
-  version: "2.39"
+  version: "2.40"
   audience: external
   type: reference
 ---
@@ -219,6 +219,30 @@ export const submitObservations = getServerConfig().enableWrites
 ```
 
 `DisabledMetadata` shape: `{ reason: string; hint?: string; since?: string }`. The `reason` renders as a sentence on the disabled card; `hint` (when present) renders as a code-styled block — use whatever the gate is (env var line, config key, doc reference). `since` annotates the card with a small "since vX" tag — useful when phasing a tool out behind a flag before removal.
+
+**The module-scope gate parses all server config at import.** `getServerConfig()` in the gate runs while the definitions file loads, before `createApp()` opens its startup error boundary. It sees `.env` (see `api-config` § When `.env` loads), but it validates every server variable, not only the flag, so an invalid value in any of them stops the process on the raw `ConfigurationError` stack (variable named, exit 1) instead of the `Configuration error — server failed to start` banner. Where the banner matters, gate on a one-field accessor whose schema `.catch()`es to the safe value, and keep the full `getServerConfig()` in `setup()`:
+
+```typescript
+// src/config/server-config.ts, beside getServerConfig()
+const WriteGateSchema = z.object({
+  enableWrites: ServerConfigSchema.shape.enableWrites.catch(false),
+});
+
+/** The write gate alone: an invalid value reads as off, and `getServerConfig()` in `setup()` reports it. */
+export function writesEnabled(): boolean {
+  return parseEnvConfig(WriteGateSchema, { enableWrites: 'MY_ENABLE_WRITES' }).enableWrites;
+}
+
+// The definitions file
+export const writeRecords = writesEnabled()
+  ? writeRecordsDef
+  : disabledTool(writeRecordsDef, {
+      reason: 'Writes are turned off in this deployment.',
+      hint: 'MY_ENABLE_WRITES=true',
+    });
+```
+
+The fallback never serves a request: the full parse in `setup()` fails on the same value and prints the banner before any transport binds.
 
 **Three tool listings** to keep straight:
 
@@ -721,7 +745,7 @@ export const fetchArticles = tool('fetch_articles', {
 
 API-wrapping tools usually delegate to a service: `await ncbi.fetch(input, ctx)`. The throw lives in the service, not the handler. Services accept `ctx` (the unified Context) so they can call `ctx.log`, `ctx.state`, etc. The handler doesn't catch — it just bubbles, and the framework's auto-classifier preserves `data` on the wire.
 
-The contract entry on the tool and the `data: { reason }` on the service throw need to use the **same reason string** so the two sides line up. That reason is all it takes: the framework fills the calling tool's declared `recovery` onto the failure as it leaves the handler.
+The contract entry on the tool and the `data: { reason }` on the service throw need to use the **same reason string** so the two sides line up. That reason is all it takes: the framework fills the calling tool's declared `recovery` and `retryable` onto the failure as it leaves the handler.
 
 ```typescript
 // service — receives ctx; passes data.reason
@@ -766,7 +790,7 @@ When no contract entry fits — prototype code, one-off throws, or service-layer
 
 ```typescript
 // Client input error — agent can fix and retry
-import { validationError, notFound } from '@cyanheads/mcp-ts-core/errors';
+import { notFound, validationError } from '@cyanheads/mcp-ts-core/errors';
 throw validationError(`Invalid date format: "${input.date}". Expected YYYY-MM-DD.`);
 
 // Not found — valid input but entity doesn't exist

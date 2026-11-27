@@ -4,7 +4,7 @@ description: >
   DataCanvas primitive reference — a Tier 3 SQL/analytical workspace for tabular MCP servers, backed by DuckDB. Use when registering tables from upstream APIs, running ad-hoc SQL across them, and exporting results. Covers the acquire → register → query → export flow, per-table TTL, the token-sharing pattern for multi-agent collaboration, env config, and Cloudflare Workers fail-closed behavior.
 metadata:
   author: cyanheads
-  version: "2.16"
+  version: "2.17"
   audience: external
   type: reference
 ---
@@ -35,7 +35,7 @@ If canvas earns its keep, it carries an obligation: **a tool that emits a `canva
 ## Imports
 
 ```ts
-import type { DataCanvas, CanvasInstance, ColumnSchema } from '@cyanheads/mcp-ts-core/canvas';
+import type { CanvasInstance, ColumnSchema, DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
 ```
 
 The framework wires the optional service onto `CoreServices`, accessible in the `setup()` callback — **not on `Context`**. Handlers access canvas via a module-level accessor:

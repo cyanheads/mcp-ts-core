@@ -4,7 +4,7 @@ description: >
   Canonical reference for the unified `Context` object passed to every tool and resource handler in `@cyanheads/mcp-ts-core`. Covers the full interface, its `RequestContext` base, all sub-APIs (`ctx.log`, `ctx.state`, `ctx.requestInput`, `ctx.inputs`, `ctx.clientCapabilities`, `ctx.enrich`, `ctx.content`), and when to use each.
 metadata:
   author: cyanheads
-  version: "2.19"
+  version: "2.20"
   audience: external
   type: reference
 ---
@@ -102,8 +102,8 @@ interface Context extends RequestContext {
 `Context extends RequestContext`. There is a single request-shape type; the handler-facing `Context` adds handler-only surfaces (`log`, `state`, `signal`, `requestInput`, `inputs`, `clientCapabilities`, `enrich`, `content`, `uri`) on top of it and redeclares none of the identity fields. A handler's `ctx` is therefore assignable anywhere a `RequestContext` is — services, storage, the framework logger — with no slice helper and no cast.
 
 ```ts
-import { requestContextService, withExtra } from '@cyanheads/mcp-ts-core/utils';
 import type { RequestContext } from '@cyanheads/mcp-ts-core/utils';
+import { requestContextService, withExtra } from '@cyanheads/mcp-ts-core/utils';
 
 // A service typed against RequestContext accepts a handler ctx directly.
 async function fetchUser(id: string, ctx: RequestContext) { /* … */ }

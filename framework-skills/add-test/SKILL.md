@@ -4,7 +4,7 @@ description: >
   Scaffold a test file for an existing tool, resource, or service. Use when the user asks to add tests, improve coverage, or when a definition exists without a matching test file.
 metadata:
   author: cyanheads
-  version: "1.10"
+  version: "1.11"
   audience: external
   type: reference
 ---
@@ -57,8 +57,8 @@ Read the handler and identify:
  * @module tests/tools/{{TOOL_NAME}}.tool.test
  */
 
-import { describe, expect, it } from 'vitest';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { describe, expect, it } from 'vitest';
 import { {{TOOL_EXPORT}} } from '@/mcp-server/tools/definitions/{{tool-name}}.tool.js';
 
 describe('{{TOOL_EXPORT}}', () => {
@@ -109,8 +109,8 @@ describe('{{TOOL_EXPORT}}', () => {
  * @module tests/resources/{{RESOURCE_NAME}}.resource.test
  */
 
-import { describe, expect, it } from 'vitest';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { describe, expect, it } from 'vitest';
 import { {{RESOURCE_EXPORT}} } from '@/mcp-server/resources/definitions/{{resource-name}}.resource.js';
 
 describe('{{RESOURCE_EXPORT}}', () => {
@@ -160,9 +160,9 @@ describe('{{RESOURCE_EXPORT}}', () => {
  * @module tests/services/{{domain}}/{{domain}}-service.test
  */
 
-import { beforeEach, describe, expect, it } from 'vitest';
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { StorageService } from '@cyanheads/mcp-ts-core/storage';
+import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { get{{ServiceClass}}, init{{ServiceClass}} } from '@/services/{{domain}}/{{domain}}-service.js';
 
 // Derive the minimal mock config from src/config/server-config.ts — read

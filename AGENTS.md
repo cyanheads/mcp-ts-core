@@ -72,7 +72,7 @@ All subpaths prefixed with `@cyanheads/mcp-ts-core`. **†Tier 3 modules** requi
 ```ts
 // Framework (from node_modules) — z is re-exported, no separate zod import needed
 import { tool, z } from '@cyanheads/mcp-ts-core';
-import { McpError, JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 
 // Server's own code (via path alias)
 import { getMyService } from '@/services/my-domain/my-service.js';
@@ -88,9 +88,9 @@ Build configs exported for consumer extension: `tsconfig.json` extends `@cyanhea
 
 ```ts
 import { createApp } from '@cyanheads/mcp-ts-core';
-import { allToolDefinitions } from './mcp-server/tools/index.js';
-import { allResourceDefinitions } from './mcp-server/resources/index.js';
 import { allPromptDefinitions } from './mcp-server/prompts/index.js';
+import { allResourceDefinitions } from './mcp-server/resources/index.js';
+import { allToolDefinitions } from './mcp-server/tools/index.js';
 
 await createApp({
   name: 'my-mcp-server',           // overrides package.json / MCP_SERVER_NAME
@@ -415,7 +415,7 @@ See `api-context` skill for full details.
 
 ## Error Handling
 
-**Recommended path: declare a typed error contract.** Add `errors: [{ reason, code, when, recovery, retryable?, severity?, thrownBy? }]` to `tool()` / `resource()`. Handler gets `ctx.fail(reason, msg?, data?)` typed against the reason union — typos fail at compile time. Runtime auto-populates `data.reason` for observability; linter enforces conformance against the handler body. `recovery` is required (≥5 words, lint-validated) — the wire hint for its reason: when a failure whose `data.reason` names the entry reaches the tool or resource factory without `data.recovery`, the framework fills `data.recovery.hint` from it — a bare `ctx.fail('reason')` and a service throw carrying `{ reason }` alike, matched on the reason alone — and mirrors it into `content[]` text. Override with explicit `{ recovery: { hint: '...' } }` when runtime context matters; a throw-site `recovery` always wins, and the thrown `McpError` itself is never changed. Optional `severity` (`debug`/`info`/`notice`/`warning`) logs a modeled outcome below `error` — logging only, on the `Error in tool:<name>` / `Error in resource:<name>` record a failed call or read writes: the wire envelope, the span status, and the `mcp.tool.*` / `mcp.resource.*` metrics are untouched. The framework's own `invalid_arguments` and `client_capability_missing` refusals log at `notice` unless an entry naming them declares otherwise, and so does a missing-scope refusal (the inline `auth` check or `checkScopes`), which carries no reason to declare, as do a resource's `params` rejection and a resource read failing with the not-found shape (`-32602` whose `data` is exactly `{ uri }`); a missing auth context, a handler's own `forbidden()`, and an upstream 403 keep `error`. Every such refusal record logs no stack, whatever level an entry declares, and an argument rejection — its record and its `-32602` result alike — keeps at most the first 1,024 characters of each string and key, the first 10 entries of each array and keys of each object, two levels of lists and objects below each issue, and 30 issues in `data.issues`, the uncut length or count beside each cut. Optional `thrownBy: 'service'` marks an entry the service layer produces, so `error-contract-unthrown` skips it while still checking the handler's own reasons — lint-only metadata, nothing at runtime reads it.
+**Recommended path: declare a typed error contract.** Add `errors: [{ reason, code, when, recovery, retryable?, severity?, thrownBy? }]` to `tool()` / `resource()`. Handler gets `ctx.fail(reason, msg?, data?)` typed against the reason union — typos fail at compile time. Runtime auto-populates `data.reason` for observability; linter enforces conformance against the handler body. `recovery` is required (≥5 words, lint-validated) — the wire hint for its reason: when a failure whose `data.reason` names the entry reaches the tool or resource factory without `data.recovery`, the framework fills `data.recovery.hint` from it — a bare `ctx.fail('reason')` and a service throw carrying `{ reason }` alike, matched on the reason alone — and mirrors it into `content[]` text. Override with explicit `{ recovery: { hint: '...' } }` when runtime context matters; a throw-site `recovery` always wins, and the thrown `McpError` itself is never changed. A declared `retryable` fills the same failures independently of the hint: a failure naming the reason with no `data.retryable` of its own takes the entry's, whether or not the throw site set `recovery`, and a throw-site `retryable` wins, as in `ctx.fail`. Optional `severity` (`debug`/`info`/`notice`/`warning`) logs a modeled outcome below `error` — logging only, on the `Error in tool:<name>` / `Error in resource:<name>` record a failed call or read writes: the wire envelope, the span status, and the `mcp.tool.*` / `mcp.resource.*` metrics are untouched. The framework's own `invalid_arguments` and `client_capability_missing` refusals log at `notice` unless an entry naming them declares otherwise, and so does a missing-scope refusal (the inline `auth` check or `checkScopes`), which carries no reason to declare, as do a resource's `params` rejection and a resource read failing with the not-found shape (`-32602` whose `data` is exactly `{ uri }`); a missing auth context, a handler's own `forbidden()`, and an upstream 403 keep `error`. Every such refusal record logs no stack, whatever level an entry declares, and an argument rejection — its record and its `-32602` result alike — keeps at most the first 1,024 characters of each string and key, the first 10 entries of each array and keys of each object, two levels of lists and objects below each issue, and 30 issues in `data.issues`, the uncut length or count beside each cut. Optional `thrownBy: 'service'` marks an entry the service layer produces, so `error-contract-unthrown` skips it while still checking the handler's own reasons — lint-only metadata, nothing at runtime reads it.
 
 ```ts
 errors: [
@@ -498,15 +498,15 @@ Managed by `@cyanheads/mcp-ts-core`. Validated via Zod. Precedence: `createApp()
 
 ### Server config (separate schema)
 
-Own Zod schema for domain-specific env vars. **Never merge with core's schema.** Lazy-parse — Workers inject env at request time via `injectEnvVars()`, so no top-level `process.env` reads. Prefer `parseEnvConfig(schema, envMap)` from `/config` over `schema.parse(...)` — it maps schema paths to env var names (`MY_API_KEY is missing` vs. `apiKey: expected string`). Raw `ZodError` from `setup()` is still caught and converted, but messages are worse. See `api-config` skill.
+Own Zod schema for domain-specific env vars. **Never merge with core's schema.** Lazy-parse — Workers inject env at request time via `injectEnvVars()`, so no top-level `process.env` reads. Prefer `parseEnvConfig(schema, envMap)` from `/config` over `schema.parse(...)` — it maps schema paths to env var names (`MY_API_KEY is missing` vs. `apiKey: expected string`). Reading `process.env`, it first loads `./.env` once per process, shared with core config, so a call before `createApp()` sees `.env` under Node; a raw `process.env` read at import does not. Raw `ZodError` from `setup()` is still caught and converted, but messages are worse. See `api-config` skill.
 
 ---
 
 ## Testing
 
 ```ts
-import { describe, expect, it } from 'vitest';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { describe, expect, it } from 'vitest';
 import { myTool } from '@/mcp-server/tools/definitions/my-tool.tool.js';
 
 describe('myTool', () => {
@@ -528,9 +528,9 @@ describe('myTool', () => {
 
 **Fixture-based tests:** `mcpTest` from `/testing/vitest` (optional peer `vitest`) extends Vitest's `test` with per-test fixtures: `ctx` (fresh mock context), `session` (session-bound context), `fetchMock` (strict fetch fake, installed/restored around the test), and `storage` (fresh in-memory `StorageService`). Override fixtures via `.extend` with the function form only — a bare value would share one mutable context across every test in the file.
 
-**Tool contracts:** `runToolContract(definition, input)` from `/testing` validates input/output, invokes the handler, formats content, and returns production-shaped success/error surfaces — the declared `recovery` fill included — without transport auth, telemetry, or `data.requestId`. The one failure it rejects with instead of returning is a handler's `UrlElicitationRequiredError` (`-32042`), which production hands back to the SDK as a protocol error: the rejection is that handed-back `ProtocolError` (its code, message, and `data` minus `data.requestId`), not the thrown instance, so assert `{ code: -32042, data: { elicitations } }` rather than `instanceof UrlElicitationRequiredError`. `toolContractSuite(definition, { success, errors })` from `/testing/vitest` registers reusable schema/handler/error-envelope conformance cases for a server's own tool definitions.
+**Tool contracts:** `runToolContract(definition, input)` from `/testing` validates input/output, invokes the handler, formats content, and returns production-shaped success/error surfaces — the declared `recovery` and `retryable` fill included — without transport auth, telemetry, or `data.requestId`. It rejects instead of returning for the two outcomes production hands back outside a `CallToolResult`. A handler's `UrlElicitationRequiredError` (`-32042`) goes back to the SDK as a protocol error: the rejection is that handed-back `ProtocolError` (its code, message, and `data` minus `data.requestId`), not the thrown instance, so assert `{ code: -32042, data: { elicitations } }` rather than `instanceof UrlElicitationRequiredError`. A `ctx.requestInput(...)` round is returned as its `input_required` result: the rejection is the input-required signal, so `expectInputRequired(() => runToolContract(definition, input, { context }))` returns exactly what the handler factory returns, `requestState` unsealed. `toolContractSuite(definition, { success, errors })` from `/testing/vitest` registers reusable schema/handler/error-envelope conformance cases for a server's own tool definitions; a success case relies on `runToolContract`'s own output and enrichment parse, and a handler that requests input fails either case kind.
 
-**Fuzz testing:** `fuzzTool`/`fuzzResource`/`fuzzPrompt` from `/testing/fuzz` generate valid and adversarial inputs from Zod schemas via `fast-check`, then assert handler invariants (no crashes, no prototype pollution, no stack trace leaks). Returns a `FuzzReport` for custom assertions.
+**Fuzz testing:** `fuzzTool`/`fuzzResource`/`fuzzPrompt` from `/testing/fuzz` generate valid and adversarial inputs from Zod schemas via `fast-check`, then assert handler invariants (no crashes, no prototype pollution, no stack trace leaks). A handler's `ctx.requestInput` round counts as a completed call, not a crash, and a tool's return is parsed as production parses it. Returns a `FuzzReport` for custom assertions.
 
 ```ts
 import { fuzzTool } from '@cyanheads/mcp-ts-core/testing/fuzz';

@@ -4,7 +4,7 @@ description: >
   Reference for core and server configuration in `@cyanheads/mcp-ts-core`. Covers env var tables with defaults, priority order, server-specific Zod schema pattern, and Workers lazy-parsing requirement.
 metadata:
   author: cyanheads
-  version: "1.33"
+  version: "1.34"
   audience: external
   type: reference
 ---
@@ -21,7 +21,7 @@ Import: `AppConfig`, `config`, `parseConfig`, `resetConfig`, `ConfigSchema` from
 
 Managed by `@cyanheads/mcp-ts-core`. Validated via Zod from environment variables. Uses a lazy proxy — parsing is deferred until the first property read, and importing the package (any subpath) never reads it, so a bad framework variable surfaces when `createApp()` starts: the `Configuration error — server failed to start` banner lists each failure as the variable, its schema path, and the reason (`  - CANVAS_DEFAULT_ROW_LIMIT (canvas.defaultRowLimit): Too small: expected number to be >=1`), and the process exits 1. The thrown `ConfigurationError` carries the same failures as `data.issues` (`{ envVar, path, message, code }`). `createWorkerHandler()` drops any config cached before its first request and re-parses after the bindings are injected.
 
-**Startup overrides must survive reparsing.** `createApp()` resets core config when applying identity or session-mode options, so an earlier `resetConfig(overrides)` is not a persistent application default. After dotenv loading, seed server defaults into unset environment variables (including blank or whole-value placeholder settings), preserve explicit operator values, then reset the cached config. Validate the resolved `core.config` in `setup()`.
+**Startup overrides must survive reparsing.** `createApp()` resets core config when applying identity or session-mode options, so an earlier `resetConfig(overrides)` is not a persistent application default. Seed server defaults into unset environment variables once `.env` has loaded — after a `parseEnvConfig` call such as `getServerConfig()` (see **When `.env` loads** under Server config) — treating blank and whole-value placeholder settings as unset and preserving explicit operator values, then reset the cached config. A raw `process.env` check made before that misses a `.env` value under Node and seeds over it. Validate the resolved `core.config` in `setup()`.
 
 **Priority (highest to lowest):**
 
@@ -94,7 +94,7 @@ await createApp({ sessionMode: { default: 'stateful', require: 'stateful' } }); 
 | Env Var | `AppConfig` field | Default | Notes |
 |:--------|:-----------------|:--------|:------|
 | `NODE_ENV` | `environment` | `development` | Aliases: `dev`→`development`, `prod`→`production`, `test`→`testing` |
-| `MCP_LOG_LEVEL` | `logLevel` | `debug` | The floor for every log sink — stderr, the files, OTLP export, and the `ctx.log` mirror to the client (`notifications/message`), which a client's own level can only narrow. Compared on the RFC 5424 order, so `notice` drops `info` and `crit` drops `error`. Aliases: `warn`→`warning`, `err`→`error`, `fatal`/`silent`→`emerg`, `trace`→`debug`, `information`→`info` |
+| `MCP_LOG_LEVEL` | `logLevel` | `info` | The floor for every log sink — stderr, the files, OTLP export, and the `ctx.log` mirror to the client (`notifications/message`), which a client's own level can only narrow. Compared on the RFC 5424 order, so `notice` drops `info` and `crit` drops `error`. Aliases: `warn`→`warning`, `err`→`error`, `fatal`/`silent`→`emerg`, `trace`→`debug`, `information`→`info` |
 | `LOGS_DIR` | `logsPath` | `<app-root>/logs` | Node.js only; absolute paths are used verbatim, relative ones resolve against the application root (see Core config) — never the framework's install directory. A file under it that cannot be opened (read-only mount, another user's directory) is dropped at startup with one `warning` naming it and the error code; stderr and the other files keep logging |
 | `LOG_TOOL_FAILURE_PAYLOADS` | `logToolFailurePayloads` | `false` | Opt-in. Each failed tool call also writes a `Tool failure payload: <tool>` record carrying `toolInput` (the arguments as sent) and `toolResult` (the `CallToolResult` returned) as redacted JSON strings, at the call's error-record level. Reaches every log destination — stderr, `combined.log`, and OTLP when `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` is set. Redaction is by key name only, so a secret inside a free-form value (a query, a message) is logged. Record shape: `api-telemetry` Logs |
 | `LOG_TOOL_FAILURE_PAYLOAD_MAX_BYTES` | `logToolFailurePayloadMaxBytes` | `16384` | Cap per payload, in UTF-8 bytes. A longer one is cut on a character boundary and flagged with `toolInputTruncated` / `toolResultTruncated` |
@@ -283,6 +283,8 @@ export function getServerConfig(): ServerConfig {
   return _config;
 }
 ```
+
+**When `.env` loads.** On Node, `./.env` loads from the working directory once per process, the first time framework config or `parseEnvConfig` reads `process.env` — so `getServerConfig()` sees `.env` values even when a module-scope `disabledTool()` gate or a `z.lazy` bound calls it during import. Values already in the process environment win, and a missing file is ignored. Bun loads `.env` itself at startup; Workers never read one. `parseEnvConfig` given an `env` object other than `process.env` reads only that object. A `.env` that exists but cannot be loaded (unreadable, a directory) stops `createApp()` with the banner `Failed to load .env from the working directory.`, exit 1. A raw `process.env` read at import, before either parser has run, still misses `.env` under Node.
 
 **Call `getServerConfig()` in `createApp`'s `setup()`.** The accessor alone parses on first read, which is usually the first tool call: an invalid value then lets the server report ready and fails every call instead, including tools that never read the bad variable. Calling it in `setup()` turns that into a startup failure — the `ConfigurationError` banner naming the variable, exit code 1, before any transport binds. On Workers `setup()` runs inside the first request, after `injectEnvVars()`, so the call is safe there too.
 

@@ -293,18 +293,18 @@ Tool and resource handlers receive a `Context`. `ctx.enrich` and `ctx.fail` are 
 ### Subpath exports
 
 ```ts
-import { createApp, tool, resource, prompt } from '@cyanheads/mcp-ts-core';
+import { createApp, prompt, resource, tool } from '@cyanheads/mcp-ts-core';
 import { createWorkerHandler } from '@cyanheads/mcp-ts-core/worker';
-import { McpError, JsonRpcErrorCode, notFound, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError, notFound, serviceUnavailable } from '@cyanheads/mcp-ts-core/errors';
 import { checkScopes } from '@cyanheads/mcp-ts-core/auth';
-import { markdown, fetchWithTimeout } from '@cyanheads/mcp-ts-core/utils';
-import { OpenRouterProvider, GraphService } from '@cyanheads/mcp-ts-core/services';
-import type { DataCanvas, CanvasInstance } from '@cyanheads/mcp-ts-core/canvas';
+import { fetchWithTimeout, markdown } from '@cyanheads/mcp-ts-core/utils';
+import { GraphService, OpenRouterProvider } from '@cyanheads/mcp-ts-core/services';
+import type { CanvasInstance, DataCanvas } from '@cyanheads/mcp-ts-core/canvas';
 import { defineMirror, sqliteMirrorStore } from '@cyanheads/mcp-ts-core/mirror';
 import { validateDefinitions } from '@cyanheads/mcp-ts-core/linter';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { mcpTest, toolContractSuite } from '@cyanheads/mcp-ts-core/testing/vitest';
-import { fuzzTool, fuzzResource, fuzzPrompt } from '@cyanheads/mcp-ts-core/testing/fuzz';
+import { fuzzPrompt, fuzzResource, fuzzTool } from '@cyanheads/mcp-ts-core/testing/fuzz';
 import { renderAppTool } from '@cyanheads/mcp-ts-core/testing/apps';
 ```
 

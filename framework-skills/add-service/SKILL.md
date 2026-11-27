@@ -4,7 +4,7 @@ description: >
   Scaffold a new service integration. Use when the user asks to add a service, integrate an external API, or create a reusable domain module with its own initialization and state.
 metadata:
   author: cyanheads
-  version: "1.13"
+  version: "1.14"
   audience: external
   type: reference
 ---
@@ -102,8 +102,8 @@ When a service wraps an external API, apply these patterns. For the framework re
 Place retry at the service method level — covering both HTTP fetch and response parsing/validation. The HTTP client should be single-attempt; the service owns retry. Use `withRetry` from `@cyanheads/mcp-ts-core/utils`:
 
 ```typescript
-import { withRetry, fetchWithTimeout } from '@cyanheads/mcp-ts-core/utils';
 import type { Context } from '@cyanheads/mcp-ts-core';
+import { fetchWithTimeout, withRetry } from '@cyanheads/mcp-ts-core/utils';
 
 async fetchItem(id: string, ctx: Context): Promise<Item> {
   return withRetry(
@@ -131,7 +131,7 @@ async fetchItem(id: string, ctx: Context): Promise<Item> {
 
 1. **Calibrate backoff to the upstream.** 200–500ms for ephemeral failures, 1–2s for rate-limited APIs, 2–5s for service degradation. The default `baseDelayMs: 1000` suits most APIs.
 2. **Check HTTP status before parsing.** `fetchWithTimeout` already throws on non-OK responses with granular status mapping (400→`InvalidParams`, 401→`Unauthorized`, 403→`Forbidden`, 404→`NotFound`, 408/425/504→`Timeout`, 422→`ValidationError`, 429→`RateLimited`, other 5xx→`ServiceUnavailable`) — this prevents feeding HTML error pages into XML/JSON parsers.
-3. **Classify parse failures by content.** If the upstream returns HTTP 200 with an HTML error page, detect it and throw `ServiceUnavailable` (transient) instead of `SerializationError` (non-transient). **Exception — deterministic HTTP 200 errors fail fast, not transient.** Some upstreams return HTTP 200 with a structured error body for failures that will *never* succeed regardless of how many times you retry: a query too expensive for the server's budget, an oversized result set, or a malformed request the server rejects. Retrying these wastes upstream capacity and delays the client. Declare them in the contract with `retryable: false` (or pass `{ retryable: false }` in `data` at the throw site) — `withRetry`'s default predicate reads `error.data.retryable === false` and fails immediately, even for `Timeout`/`ServiceUnavailable` codes. `ctx.fail` auto-populates `data.retryable` from the contract entry, so declaring it once in `errors[]` is enough.
+3. **Classify parse failures by content.** If the upstream returns HTTP 200 with an HTML error page, detect it and throw `ServiceUnavailable` (transient) instead of `SerializationError` (non-transient). **Exception — deterministic HTTP 200 errors fail fast, not transient.** Some upstreams return HTTP 200 with a structured error body for failures that will *never* succeed regardless of how many times you retry: a query too expensive for the server's budget, an oversized result set, or a malformed request the server rejects. Retrying these wastes upstream capacity and delays the client. Pass `{ retryable: false }` in `data` at the throw site — `withRetry`'s default predicate reads `error.data.retryable === false` and fails immediately, even for `Timeout`/`ServiceUnavailable` codes. Declare `retryable: false` on the calling tool's contract entry as well: the handler factory fills it onto the wire for a service throw carrying that reason, but only at the handler boundary, after `withRetry` inside the service has seen what the service threw.
 4. **Exhausted retries say so.** `withRetry` automatically enriches the final error with attempt count — callers know retries were already attempted.
 
 ### When you need finer-grained HTTP error classification
@@ -233,7 +233,7 @@ Services don't declare `errors: [...]` contracts and don't have `ctx.fail` — t
   ```
 
 - **Tool/resource handlers bubble service errors unchanged** — the contract advertises the *advertised* failure surface, and any code thrown from a service still reaches the client correctly via the auto-classifier. The conformance lint scans handler source text only, so service-thrown codes aren't flagged.
-- **Carry contract `reason` via `data: { reason }`** when the calling tool declares an `errors[]` contract entry for this failure mode. Services can't call `ctx.fail`, but passing the reason in `data` flows through the auto-classifier untouched, so clients see the same `error.data.reason` they'd see from `ctx.fail` — and the framework fills that entry's `recovery` as `data.recovery.hint` when the throw carries none. No handler-side catch-and-rethrow needed:
+- **Carry contract `reason` via `data: { reason }`** when the calling tool declares an `errors[]` contract entry for this failure mode. Services can't call `ctx.fail`, but passing the reason in `data` flows through the auto-classifier untouched, so clients see the same `error.data.reason` they'd see from `ctx.fail` — and the framework fills that entry's `recovery` as `data.recovery.hint` and its `retryable` as `data.retryable`, each when the throw sets none of its own. No handler-side catch-and-rethrow needed:
 
   ```ts
   // tool declares: errors: [{ reason: 'empty_expression', code: JsonRpcErrorCode.ValidationError,

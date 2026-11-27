@@ -4,7 +4,7 @@ description: >
   Exercise tools, resources, and prompts against a live HTTP server via MCP JSON-RPC over curl. Starts the server, surfaces the catalog, runs real and adversarial inputs, measures every call (bytes, token estimate, wall-clock) and weighs the catalog, renders app tools' views in a headless MCP Apps host, and produces a tight report with concrete findings and numbered follow-up options. Use after adding or modifying definitions, or when the user asks to test, try out, or verify their MCP surface.
 metadata:
   author: cyanheads
-  version: "2.27"
+  version: "2.28"
   audience: external
   type: debug
 ---
@@ -41,7 +41,7 @@ cat > /tmp/<project-name>-field-test-9DJ73-K103L.sh <<'HELPER_EOF'
 # threads pid/url/port/sid/log through each call rather than relying on a state
 # file or env vars (the Bash tool wipes shell state between calls, and a
 # pointer file would race the same way two agents race on shared state).
-# See https://github.com/cyanheads/mcp-ts-core/issues/90, #144.
+# See https://github.com/cyanheads/mcp-ts-core/issues/90, https://github.com/cyanheads/mcp-ts-core/issues/144.
 #
 # Surfaces failures aggressively — field test is for finding things that fail,
 # so the helper auto-tails logs and prints HTTP status/body on errors instead

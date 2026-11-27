@@ -4,7 +4,7 @@ description: >
   Catalog of OpenTelemetry instrumentation built into framework `@cyanheads/mcp-ts-core` — spans, metrics, completion logs, env config, runtime caveats, custom instrumentation patterns, and cardinality rules. Use when enabling OTel export, adding custom spans or metrics in services, debugging missing telemetry, looking up attribute names, or deciding what's safe to put on a metric attribute vs. a span.
 metadata:
   author: cyanheads
-  version: "1.25"
+  version: "1.26"
   audience: external
   type: reference
 ---
@@ -286,7 +286,7 @@ The record goes wherever the error record goes: stderr, `combined.log`, and OTLP
 Need a span or metric for your own service? Use the helpers from `@cyanheads/mcp-ts-core/utils` (full signatures in `api-utils` → `Telemetry`):
 
 ```ts
-import { withSpan, createCounter, createHistogram } from '@cyanheads/mcp-ts-core/utils';
+import { createCounter, createHistogram, withSpan } from '@cyanheads/mcp-ts-core/utils';
 
 const myOps = createCounter('myservice.operations', 'My service ops', '{ops}');
 const myDuration = createHistogram('myservice.duration', 'My service duration', 'ms');

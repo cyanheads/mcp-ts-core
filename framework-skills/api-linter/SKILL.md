@@ -4,7 +4,7 @@ description: >
   MCP definition linter rules reference. Use when `bun run lint:mcp` or `bun run devcheck` reports a lint error or warning (`format-parity`, `schema-is-object`, `name-format`, `server-json-*`, etc.) and you need to understand the rule, its severity, and how to fix it. Every rule ID the linter emits has an entry in this doc.
 metadata:
   author: cyanheads
-  version: "1.25"
+  version: "1.26"
   audience: external
   type: reference
 ---
@@ -27,8 +27,8 @@ Both surface the same `LintReport` from `validateDefinitions()` (exported from `
 **Imports (if you need to run the linter programmatically):**
 
 ```ts
+import type { LintDiagnostic, LintReport } from '@cyanheads/mcp-ts-core/linter';
 import { validateDefinitions } from '@cyanheads/mcp-ts-core/linter';
-import type { LintReport, LintDiagnostic } from '@cyanheads/mcp-ts-core/linter';
 
 const report = validateDefinitions({ tools, resources, prompts, serverJson, packageJson });
 if (!report.passed) process.exit(1);

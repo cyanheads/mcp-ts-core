@@ -4,7 +4,7 @@ description: >
   Testing patterns for MCP tool/resource handlers using `createMockContext` and Vitest. Covers mock context options, handler testing, McpError assertions, format testing, Vitest config setup, and test isolation conventions.
 metadata:
   author: cyanheads
-  version: "1.18"
+  version: "1.19"
   audience: external
   type: reference
 ---
@@ -118,6 +118,8 @@ match: (req) => {
 
 Point the reusable suite at a definition plus representative success and failure inputs. It checks input/output schemas, invokes the real handler, applies formatting/enrichment/content, and validates both public error surfaces.
 
+A success case's output is parsed once, by `runToolContract`, as production parses it: the handler's return against `output`, what it enriched against `enrichment`. A strict `output` root beside enrichment, a `z.stringbool()` field, and a `.transform()` or cross-type `.pipe()` field therefore pass as they do on the wire. `expected` takes a subset of `output`; enrichment assertions go in `assert`. A handler that requests input fails either case kind, because `runToolContract` rejects with that round — assert it with `expectInputRequired` (see [Mock inputs](#mock-inputs)).
+
 ```ts
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
 import { toolContractSuite } from '@cyanheads/mcp-ts-core/testing/vitest';
@@ -133,7 +135,7 @@ toolContractSuite(searchTool, {
 });
 ```
 
-Use `runToolContract(definition, input, { context })` from `/testing` when a custom test runner or an imperative assertion is a better fit. It intentionally skips transport auth and telemetry; those belong in transport/integration tests. Every failure comes back as the error result a client would receive, except a handler's `UrlElicitationRequiredError` (`-32042`): production hands that back to the SDK as a protocol error, so `runToolContract` rejects with the `ProtocolError` it hands back — its code, message, and `data` minus `data.requestId`, not the thrown instance — and a test asserts `{ code: -32042, data: { elicitations } }` rather than `instanceof UrlElicitationRequiredError`.
+Use `runToolContract(definition, input, { context })` from `/testing` when a custom test runner or an imperative assertion is a better fit. It intentionally skips transport auth and telemetry; those belong in transport/integration tests. Every failure comes back as the error result a client would receive, except a handler's `UrlElicitationRequiredError` (`-32042`): production hands that back to the SDK as a protocol error, so `runToolContract` rejects with the `ProtocolError` it hands back — its code, message, and `data` minus `data.requestId`, not the thrown instance — and a test asserts `{ code: -32042, data: { elicitations } }` rather than `instanceof UrlElicitationRequiredError`. An input round is no failure: production returns a handler's `ctx.requestInput(...)` as an `input_required` result, not a `CallToolResult`, so `runToolContract` rejects with the input-required signal, and `expectInputRequired(() => runToolContract(definition, input, { context }))` returns exactly what the handler factory returns — on an aborted `context.signal` too — with `requestState` unsealed.
 
 A declared reason thrown without a hint — a bare `ctx.fail('reason')` or a service throw carrying `{ reason }` — comes back with the entry's `recovery` as `data.recovery.hint` and a `Recovery:` line in `content[]`, as in production. The one production field it leaves out is `data.requestId` (and the `request <id>` term closing `content[]`), since there is no real request; a test asserting the factory's envelope instead expects both. Calling `definition.handler(...)` directly returns the `McpError` exactly as the throw site built it — no fill, no request id.
 
@@ -251,6 +253,21 @@ const asked = await expectInputRequired(() => exportReport.handler(input, create
 expect(asked.inputRequests?.format?.method).toBe('elicitation/create');
 ```
 
+Wrap `runToolContract` instead to assert the round through the contract boundary: it rejects with the same signal, so `expectInputRequired` returns the result the handler factory returns. Its `context` drives the next round:
+
+```ts
+import { expectInputRequired, runToolContract } from '@cyanheads/mcp-ts-core/testing';
+
+const asked = await expectInputRequired(() => runToolContract(exportReport, { reportId: 'r1' }));
+const answered = await runToolContract(exportReport, { reportId: 'r1' }, {
+  context: {
+    inputResponses: { format: { action: 'accept', content: { format: 'csv' } } },
+    requestState: asked.requestState,
+  },
+});
+expect(answered.structuredContent).toMatchObject({ url: expect.any(String) });
+```
+
 Pass `asked.requestState` back as `createMockContext({ requestState })` when the handler reads state from the prior round. `inputResponses` drives the second round. `ctx.inputs.accepted(key, schema)` and `.view(key)` read it with the same helpers production uses, so a wrong response shape fails in the test:
 
 ```ts
@@ -318,8 +335,8 @@ expect(log.calls.some(c => c.level === 'info' && c.msg.includes('Processing'))).
 
 ```ts
 // tests/tools/my-tool.tool.test.ts
-import { describe, expect, it } from 'vitest';
 import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
+import { describe, expect, it } from 'vitest';
 import { myTool } from '@/mcp-server/tools/definitions/my-tool.tool.js';
 
 describe('myTool', () => {
@@ -429,8 +446,8 @@ Extend the framework's base config using `mergeConfig`. The base provides `globa
 
 ```ts
 // vitest.config.ts
-import { defineConfig, mergeConfig } from 'vitest/config';
 import coreConfig from '@cyanheads/mcp-ts-core/vitest.config';
+import { defineConfig, mergeConfig } from 'vitest/config';
 
 export default mergeConfig(coreConfig, defineConfig({
   resolve: {
@@ -473,7 +490,7 @@ describe('myTool with service', () => {
 ## McpError assertions
 
 ```ts
-import { McpError, JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { JsonRpcErrorCode, McpError } from '@cyanheads/mcp-ts-core/errors';
 
 it('throws NotFound for missing resource', async () => {
   const ctx = createMockContext();
@@ -509,8 +526,8 @@ It composes as an asymmetric matcher anywhere a value is expected — e.g. `toHa
 Tools and resources that declare an `errors[]` contract receive a typed `ctx.fail` helper at runtime. Pass the definition's own `errors` to `createMockContext` and the mock wires `fail` the same way the production handler factory does:
 
 ```ts
-import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { JsonRpcErrorCode } from '@cyanheads/mcp-ts-core/errors';
+import { createMockContext } from '@cyanheads/mcp-ts-core/testing';
 import { fetchItems } from '@/mcp-server/tools/definitions/fetch-items.tool.js';
 
 it('throws ctx.fail("no_match") when no items resolve', async () => {
@@ -556,7 +573,7 @@ it('builds an error with the contract code and reason', () => {
 For schema-heavy or input-validation-critical handlers, the framework ships fuzz helpers under `@cyanheads/mcp-ts-core/testing/fuzz`. They generate valid + adversarial inputs from your Zod schemas via `fast-check` and assert handler invariants (no crashes, no prototype pollution, no stack-trace leaks).
 
 ```ts
-import { fuzzTool, fuzzResource, fuzzPrompt } from '@cyanheads/mcp-ts-core/testing/fuzz';
+import { fuzzPrompt, fuzzResource, fuzzTool } from '@cyanheads/mcp-ts-core/testing/fuzz';
 
 it('survives fuzz testing', async () => {
   const report = await fuzzTool(myTool, { numRuns: 100, numAdversarial: 30 });
@@ -573,5 +590,7 @@ it('survives fuzz testing', async () => {
 | `adversarialArbitrary()` / `ADVERSARIAL_STRINGS` | Targeted injection sets (prototype pollution probes, control characters, oversized payloads). |
 
 `FuzzOptions`: `numRuns` (default 50), `numAdversarial` (default 30), `seed` (reproducibility), `timeout` (per-call ms, default 5000), `ctx` (`MockContextOptions` for stateful handlers).
+
+A handler that requests input completes its call, as production returns its `input_required` result, so it never lands in `report.crashes`. A tool's return is parsed as production parses it: output that breaks `output`, or that carries a top-level `error` key an open root (`.passthrough()`, `.catchall()`) would otherwise keep, is a crash.
 
 `report.leaks` looks for a stack frame or a server-side path in what a client can observe — the `code`, `message`, and `data` of the thrown `McpError`. Strings the input itself supplied are removed before that check, so naming the offending value in error data (`throw validationError(msg, { key })`) never registers as a leak: the client sent those bytes and learns nothing from seeing them again.

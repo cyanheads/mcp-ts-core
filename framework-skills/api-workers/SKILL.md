@@ -4,7 +4,7 @@ description: >
   Cloudflare Workers deployment using `createWorkerHandler` from `@cyanheads/mcp-ts-core/worker`. Covers the full handler signature, binding types, CloudflareBindings extensibility, runtime compatibility guards, and wrangler.toml requirements.
 metadata:
   author: cyanheads
-  version: "1.14"
+  version: "1.15"
   audience: external
   type: reference
 ---
@@ -19,9 +19,9 @@ metadata:
 
 ```ts
 import { createWorkerHandler } from '@cyanheads/mcp-ts-core/worker';
-import { echoTool } from './mcp-server/tools/definitions/echo.tool.js';
-import { echoResource } from './mcp-server/resources/definitions/echo.resource.js';
 import { echoPrompt } from './mcp-server/prompts/definitions/echo.prompt.js';
+import { echoResource } from './mcp-server/resources/definitions/echo.resource.js';
+import { echoTool } from './mcp-server/tools/definitions/echo.tool.js';
 import { initMyService } from './services/my-domain/my-service.js';
 
 export default createWorkerHandler({
@@ -88,7 +88,7 @@ Every variable the core config parser reads is either fed by a core binding or e
 
 | Group | Bindings |
 |:------|:---------|
-| Renamed | `ENVIRONMENT` → `NODE_ENV`; `LOG_LEVEL` → `MCP_LOG_LEVEL` (an unrecognized level becomes `info`) |
+| Renamed | `ENVIRONMENT` → `NODE_ENV`; `LOG_LEVEL` → `MCP_LOG_LEVEL` (unset or unrecognized, the level is `info`, the `MCP_LOG_LEVEL` default) |
 | Identity | `MCP_SERVER_NAME`, `MCP_SERVER_VERSION`, `MCP_SERVER_DESCRIPTION`, `MCP_SERVER_HOMEPAGE`, `PACKAGE_NAME`, `PACKAGE_VERSION`, `PACKAGE_DESCRIPTION`, `PACKAGE_KEYWORDS` |
 | Logging | `LOG_TOOL_FAILURE_PAYLOADS`, `LOG_TOOL_FAILURE_PAYLOAD_MAX_BYTES`, `MCP_LOG_RATE_LIMIT_THRESHOLD`, `MCP_LOG_RATE_LIMIT_WINDOW_MS`, `LOG_LLM_INTERACTIONS` |
 | HTTP surface | `MCP_HTTP_ENDPOINT_PATH`, `MCP_HTTP_MAX_BODY_BYTES`, `MCP_PUBLIC_URL`, `MCP_ALLOWED_ORIGINS`, `MCP_STATEFUL_SESSION_STALE_TIMEOUT_MS`, `MCP_HTTP_RESUMABILITY`, `MCP_HTTP_RESUMABILITY_MAX_EVENTS`, `MCP_HTTP_RESUMABILITY_TTL_MS` |
@@ -222,8 +222,8 @@ export {};
 
 ```ts
 // src/worker.ts
-import guideMd from '../skills/my-server-guide/SKILL.md';
 import idsMd from '../skills/my-server-guide/references/ids.md';
+import guideMd from '../skills/my-server-guide/SKILL.md';
 
 export default createWorkerHandler({
   tools: allToolDefinitions,

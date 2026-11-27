@@ -4,7 +4,7 @@ description: >
   API reference for all utilities exported from `@cyanheads/mcp-ts-core/utils`. Use when looking up utility method signatures, options, peer dependencies, or usage patterns.
 metadata:
   author: cyanheads
-  version: "2.24"
+  version: "2.25"
   audience: external
   type: reference
 ---
@@ -47,9 +47,9 @@ Utility exports from `@cyanheads/mcp-ts-core/utils`. Utilities with complex APIs
 | Export | API | Notes |
 |:-------|:----|:------|
 | `extractCursor` | `(params?) -> string \| undefined` | Extracts opaque cursor string from MCP request params. Checks `params.cursor` then `params._meta.cursor`. Returns `undefined` when no cursor is present. Does not decode. |
-| `paginateArray` | `<T>(items, cursorStr, defaultPageSize, maxPageSize, context: RequestContext) -> PaginatedResult<T>` | Decodes cursor, slices array, returns `{ items, nextCursor?, totalCount }`. `nextCursor` omitted on last page. Throws `McpError(InvalidParams)` on invalid cursor, inherited from `decodeCursor` (`data.reason: 'invalid_cursor'`). On a continued call the page size comes from the cursor, not `defaultPageSize` — a tool with a caller-facing `limit` input must slice on `decodeCursor(...).offset` itself to honor `limit` past page 1. |
-| `encodeCursor` | `(state: PaginationState) -> string` | Encodes `{ offset, limit, ...extra }` to opaque base64url string. |
-| `decodeCursor` | `(cursor, context: RequestContext) -> PaginationState` | Decodes opaque base64url cursor. Throws `McpError(InvalidParams)` if malformed, with `data: { cursor, reason: 'invalid_cursor', recovery: { hint } }` — the hint tells the caller to omit `cursor` or pass the previous `nextCursor` unchanged, so the rejection renders the `Recovery:` line and `(reason invalid_cursor)` trailer like any other classified failure. |
+| `paginateArray` | `<T>(items, cursorStr, defaultPageSize, maxPageSize, context: RequestContext) -> PaginatedResult<T>` | Decodes cursor, slices array, returns `{ items, nextCursor?, totalCount }`. `nextCursor` omitted on last page. Throws `McpError(InvalidParams)` on invalid cursor, inherited from `decodeCursor` (`data.reason: 'invalid_cursor'`). `defaultPageSize` and `maxPageSize` must be positive safe integers: a page size that is not one throws `McpError(InternalError)` from `encodeCursor` on the call that would issue the next cursor. On a continued call the page size comes from the cursor, not `defaultPageSize` — a tool with a caller-facing `limit` input must slice on `decodeCursor(...).offset` itself to honor `limit` past page 1. |
+| `encodeCursor` | `(state: PaginationState) -> string` | Encodes `{ offset, limit, ...extra }` to opaque base64url string. `offset` must be a non-negative safe integer and `limit` a positive safe integer, the values `decodeCursor` accepts; any other state throws `McpError(InternalError)` with `data: { offset, limit }` instead of issuing a cursor the decoder would refuse. A caller-supplied `limit` written into the state needs `.int()` on its schema. |
+| `decodeCursor` | `(cursor, context: RequestContext) -> PaginationState` | Decodes opaque base64url cursor. Throws `McpError(InvalidParams)` if malformed or if `offset` is not a non-negative safe integer or `limit` a positive safe integer, with `data: { cursor, reason: 'invalid_cursor', recovery: { hint } }` — `cursor` is the rejected cursor, past 50 characters its first 50 and `...` (the `Failed to decode pagination cursor` warning carries the same); the hint tells the caller to omit `cursor` or pass the next-page cursor from the previous response unchanged, naming no output field, so the rejection renders the `Recovery:` line and `(reason invalid_cursor)` trailer like any other classified failure. |
 
 ---
 
