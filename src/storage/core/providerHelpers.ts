@@ -11,6 +11,7 @@
 import type { StorageOptions } from '@/storage/core/IStorageProvider.js';
 import { encodeCursor } from '@/storage/core/storageValidation.js';
 import { serializationError, validationError } from '@/types-global/errors.js';
+import { echoRejected } from '@/utils/internal/observabilityCap.js';
 import { utf8ByteLength } from '@/utils/parsing/inputBudget.js';
 
 // ---------------------------------------------------------------------------
@@ -82,7 +83,7 @@ export function storedName(tenantId: string, key: string, limit: StoredNameLimit
   const longestKeyBytes = limit.maxBytes - utf8ByteLength(tenantId) - 1;
   throw validationError(
     `Key is too long for ${limit.backend}, which limits a stored name (the tenant ID, a colon, and the key) to ${limit.maxBytes} bytes. The longest key this tenant can use is ${longestKeyBytes} bytes.`,
-    { key: key.length > 50 ? `${key.substring(0, 50)}...` : key },
+    { key: echoRejected(key) },
   );
 }
 

@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   capForObservability,
+  echoRejected,
   jsonRpcIdLogFields,
   OBSERVABILITY_MAX_STRING_LENGTH,
 } from '@/utils/internal/observabilityCap.js';
@@ -61,6 +62,18 @@ describe('capForObservability', () => {
       value: value.slice(0, 1_024),
       length: 999_000,
     });
+  });
+});
+
+describe('echoRejected', () => {
+  it.each([
+    ['an empty string', '', ''],
+    ['50 characters', 'x'.repeat(50), 'x'.repeat(50)],
+    ['51 characters', `${'x'.repeat(50)}y`, `${'x'.repeat(50)}...`],
+    ['a pair ending at the 50th unit', `${'x'.repeat(48)}🙂yz`, `${'x'.repeat(48)}🙂...`],
+    ['a pair across the 50th unit', `${'x'.repeat(49)}🙂🙂`, `${'x'.repeat(49)}...`],
+  ])('echoes %s', (_label, value, echoed) => {
+    expect(echoRejected(value)).toBe(echoed);
   });
 });
 

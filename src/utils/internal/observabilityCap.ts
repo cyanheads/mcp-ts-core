@@ -42,6 +42,17 @@ export function cutLine(text: string): string {
   return `${capForObservability(text).value}…`;
 }
 
+/**
+ * A rejected caller value — a pagination cursor, a storage key or prefix — as
+ * an error's `data` and its log record echo it: whole up to 50 characters, past
+ * that its first 50 and `...`. The cut ends a unit early rather than split a
+ * surrogate pair, since a lone half serializes to an escape strict JSON parsers
+ * reject.
+ */
+export function echoRejected(value: string): string {
+  return value.length > 50 ? `${capForObservability(value, 50).value}...` : value;
+}
+
 /** Whether `unit` is the high (leading) half of a UTF-16 surrogate pair. */
 function isHighSurrogate(unit: number): boolean {
   return unit >= 0xd800 && unit <= 0xdbff;

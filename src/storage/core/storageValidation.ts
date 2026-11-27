@@ -28,6 +28,7 @@ import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { invalidParams, McpError, validationError } from '@/types-global/errors.js';
 import { base64ToString, stringToBase64 } from '@/utils/internal/encoding.js';
 import { logger } from '@/utils/internal/logger.js';
+import { echoRejected } from '@/utils/internal/observabilityCap.js';
 import { type RequestContext, withExtra } from '@/utils/internal/requestContext.js';
 import type { ListOptions, StorageOptions } from './IStorageProvider.js';
 
@@ -128,7 +129,7 @@ export function validateKey(key: string, _context: RequestContext): void {
 
   if (key.length > MAX_KEY_LENGTH) {
     throw validationError(`Key exceeds maximum length of ${MAX_KEY_LENGTH} characters.`, {
-      key: `${key.substring(0, 50)}...`,
+      key: echoRejected(key),
     });
   }
 
@@ -169,7 +170,7 @@ export function validatePrefix(prefix: string, _context: RequestContext): void {
 
   if (prefix.length > MAX_PREFIX_LENGTH) {
     throw validationError(`Prefix exceeds maximum length of ${MAX_PREFIX_LENGTH} characters.`, {
-      prefix: `${prefix.substring(0, 50)}...`,
+      prefix: echoRejected(prefix),
     });
   }
 
@@ -177,7 +178,7 @@ export function validatePrefix(prefix: string, _context: RequestContext): void {
   if (!VALID_KEY_PATTERN.test(prefix)) {
     throw validationError(
       'Prefix contains invalid characters. Only alphanumeric, hyphens, underscores, dots, and slashes are allowed.',
-      { prefix: prefix.length > 50 ? `${prefix.substring(0, 50)}...` : prefix },
+      { prefix: echoRejected(prefix) },
     );
   }
 

@@ -208,6 +208,55 @@ describe('Storage Validation', () => {
     });
   });
 
+  // A rejected key or prefix past 50 characters is echoed as its first 50 and
+  // `...`, ending a unit early rather than leave a lone surrogate, which strict
+  // JSON parsers reject as the `\ud83d` escape it serializes to.
+  describe('echoes a long rejected key or prefix without splitting a surrogate pair', () => {
+    const dataOf = (fn: () => void): unknown => {
+      try {
+        fn();
+      } catch (error) {
+        return (error as McpError).data;
+      }
+      throw new Error('expected a throw');
+    };
+
+    it.each<[string, () => void, Record<string, string>]>([
+      [
+        'an over-length ASCII key',
+        () => validateKey('k'.repeat(1025), context),
+        { key: `${'k'.repeat(50)}...` },
+      ],
+      [
+        'an over-length key with a pair across the 50th unit',
+        () => validateKey(`${'k'.repeat(49)}🙂${'k'.repeat(1000)}`, context),
+        { key: `${'k'.repeat(49)}...` },
+      ],
+      [
+        'an over-length prefix with a pair across the 50th unit',
+        () => validatePrefix(`${'p'.repeat(49)}🙂${'p'.repeat(500)}`, context),
+        { prefix: `${'p'.repeat(49)}...` },
+      ],
+      [
+        'a prefix with invalid characters and a pair across the 50th unit',
+        () => validatePrefix(`${'p'.repeat(49)}🙂p`, context),
+        { prefix: `${'p'.repeat(49)}...` },
+      ],
+      [
+        'a 50-character prefix with invalid characters, whole',
+        () => validatePrefix(`${'p'.repeat(49)}:`, context),
+        { prefix: `${'p'.repeat(49)}:` },
+      ],
+      [
+        'a 51-character prefix with invalid characters, cut',
+        () => validatePrefix(`${'p'.repeat(50)}:`, context),
+        { prefix: `${'p'.repeat(50)}...` },
+      ],
+    ])('%s', (_label, fn, data) => {
+      expect(dataOf(fn)).toEqual(data);
+    });
+  });
+
   describe('validateStorageOptions', () => {
     it('should accept valid storage options', () => {
       expect(() => validateStorageOptions({ ttl: 3600 }, context)).not.toThrow();

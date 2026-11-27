@@ -250,4 +250,10 @@ describe('storedName', () => {
       expect.objectContaining({ data: { key: 'short' } }),
     );
   });
+
+  it('ends the cut a unit early rather than split a surrogate pair across the 50th unit', () => {
+    expect(() => storedName('t1', `${'k'.repeat(49)}🙂${'k'.repeat(600)}`, KV)).toThrow(
+      expect.objectContaining({ data: { key: `${'k'.repeat(49)}...` } }),
+    );
+  });
 });

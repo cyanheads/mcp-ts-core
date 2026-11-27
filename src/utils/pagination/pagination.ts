@@ -12,9 +12,10 @@
  * @module src/utils/pagination/pagination
  */
 
-import { invalidParams, JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
+import { internalError, invalidParams, JsonRpcErrorCode, McpError } from '@/types-global/errors.js';
 import { base64ToString, stringToBase64 } from '@/utils/internal/encoding.js';
 import { logger } from '@/utils/internal/logger.js';
+import { echoRejected } from '@/utils/internal/observabilityCap.js';
 import { type RequestContext, withExtra } from '@/utils/internal/requestContext.js';
 
 /**
@@ -23,9 +24,9 @@ import { type RequestContext, withExtra } from '@/utils/internal/requestContext.
  * This is the data structure serialized into the opaque cursor token.
  */
 export interface PaginationState {
-  /** Maximum number of items per page; must be a positive integer */
+  /** Maximum number of items per page; a positive safe integer */
   limit: number;
-  /** Zero-based index of the first item in the current page */
+  /** Zero-based index of the first item in the current page; a non-negative safe integer */
   offset: number;
   /** Optional additional state preserved across pages (implementation-specific) */
   // allow open-indexed-named: generic pagination state for implementer extension
@@ -53,18 +54,45 @@ export interface PaginatedResult<T> {
 }
 
 /**
+ * Whether `state` holds a position {@link decodeCursor} accepts: `offset` a
+ * non-negative safe integer and `limit` a positive one. The encoder checks the
+ * same predicate, so the framework never issues a cursor its decoder refuses.
+ */
+function isPaginationState(state: unknown): state is PaginationState {
+  if (typeof state !== 'object' || state === null) return false;
+  const { offset, limit } = state as { offset?: unknown; limit?: unknown };
+  return (
+    typeof offset === 'number' &&
+    typeof limit === 'number' &&
+    Number.isSafeInteger(offset) &&
+    Number.isSafeInteger(limit) &&
+    offset >= 0 &&
+    limit > 0
+  );
+}
+
+/**
  * Encodes pagination state into an opaque base64url cursor string.
  * Serializes `state` to JSON, then encodes as base64url (URL-safe, no padding).
  * The format is an implementation detail — callers must treat the returned string as opaque.
  *
- * @param state - Pagination state to encode; must have `offset >= 0` and `limit > 0`
+ * @param state - Pagination state to encode; `offset` must be a non-negative safe
+ *   integer and `limit` a positive safe integer, the values {@link decodeCursor} accepts
  * @returns Base64url-encoded cursor string (no `+`, `/`, or `=` characters)
- * @throws {McpError} With code `InternalError` (-32603) if JSON serialization fails
+ * @throws {McpError} With code `InternalError` (-32603) when `offset` or `limit` is
+ *   outside those values (`data: { offset, limit }`), or when JSON serialization fails
  * @example
  * const cursor = encodeCursor({ offset: 50, limit: 25 });
  * // cursor is an opaque string like "eyJvZmZzZXQiOjUwLCJsaW1pdCI6MjV9"
  */
 export function encodeCursor(state: PaginationState): string {
+  const { offset, limit } = state;
+  if (!isPaginationState(state)) {
+    throw internalError(
+      'Failed to encode pagination cursor: offset must be a non-negative safe integer and limit a positive safe integer.',
+      { offset, limit },
+    );
+  }
   try {
     const jsonString = JSON.stringify(state);
     // Use cross-platform encoding, then convert standard base64 to base64url
@@ -86,7 +114,7 @@ export function encodeCursor(state: PaginationState): string {
 /**
  * Decodes an opaque cursor string back into pagination state.
  * Reverses base64url encoding, parses the JSON, and validates the required fields:
- * `offset` must be a non-negative number and `limit` must be a positive number.
+ * `offset` must be a non-negative safe integer and `limit` a positive safe integer.
  * Logs a warning and throws `InvalidParams` on any failure, per MCP spec.
  *
  * @param cursor - Opaque cursor string previously returned by {@link encodeCursor}
@@ -94,10 +122,12 @@ export function encodeCursor(state: PaginationState): string {
  * @returns Validated `PaginationState` decoded from the cursor
  * @throws {McpError} With code `InvalidParams` (-32602) if the cursor is malformed,
  *   base64-invalid, not valid JSON, or has an invalid `offset`/`limit` structure.
- *   `data` carries the rejected `cursor`, `reason: 'invalid_cursor'`, and a
- *   `recovery.hint`, so a tool surfaces it like any other classified failure;
- *   the parameter names it quotes are declared `literals`, so a tool's
- *   `content[]` renders them as code.
+ *   `data` carries the rejected `cursor` (past 50 characters, its first 50 and
+ *   `...`, one fewer where the 50th would split a surrogate pair; the warning
+ *   record carries the same), `reason: 'invalid_cursor'`, and
+ *   a `recovery.hint` naming no output field, so a tool surfaces it like any
+ *   other classified failure; `cursor` is declared in `literals`, so a tool's
+ *   `content[]` renders it as code.
  * @example
  * const state = decodeCursor(req.params.cursor, ctx);
  * // state.offset and state.limit are safe to use directly
@@ -107,37 +137,33 @@ export function decodeCursor(cursor: string, context: RequestContext): Paginatio
     // Convert base64url back to standard base64, then decode cross-platform
     const standardBase64 = cursor.replace(/-/g, '+').replace(/_/g, '/');
     const jsonString = base64ToString(standardBase64);
-    const state = JSON.parse(jsonString) as PaginationState;
+    const state: unknown = JSON.parse(jsonString);
 
-    // Validate required fields
-    if (
-      typeof state.offset !== 'number' ||
-      typeof state.limit !== 'number' ||
-      state.offset < 0 ||
-      state.limit <= 0
-    ) {
+    if (!isPaginationState(state)) {
       throw new Error('Invalid pagination state structure');
     }
 
     return state;
   } catch (error: unknown) {
+    // Cut past 50 characters, as `validateKey` cuts a rejected storage key.
+    const echoed = echoRejected(cursor);
     logger.warning(
       'Failed to decode pagination cursor',
       withExtra(context, {
-        cursor,
+        cursor: echoed,
         error: error instanceof Error ? error.message : String(error),
       }),
     );
     throw invalidParams(
       'Invalid pagination cursor. The cursor may be expired, corrupted, or from a different request.',
       {
-        cursor,
+        cursor: echoed,
         reason: 'invalid_cursor',
         recovery: {
-          hint: 'Omit cursor to start from the first page, or pass the nextCursor from the previous response unchanged.',
+          hint: 'Omit cursor to start from the first page, or pass the next-page cursor from the previous response unchanged.',
         },
       },
-      { literals: ['cursor', 'nextCursor'] },
+      { literals: ['cursor'] },
     );
   }
 }
@@ -178,13 +204,16 @@ export function extractCursor(params?: {
  *
  * @param items - Complete array of items to paginate; not mutated
  * @param cursorStr - Opaque cursor token from the client, or `undefined` for the first page
- * @param defaultPageSize - Page size to use when no cursor is present; must be a positive integer
- * @param maxPageSize - Upper bound on items per page; cursor limit values are clamped to this
+ * @param defaultPageSize - Page size to use when no cursor is present; must be a positive safe integer
+ * @param maxPageSize - Upper bound on items per page; cursor limit values are clamped to this.
+ *   Must be a positive safe integer
  * @param context - Request context used for logging when cursor decoding fails
  * @returns `PaginatedResult<T>` with the current page's items, `totalCount` set to `items.length`,
  *   and `nextCursor` included only if additional pages remain
  * @throws {McpError} With code `InvalidParams` (-32602) if `cursorStr` is present but invalid,
  *   propagated from {@link decodeCursor}
+ * @throws {McpError} With code `InternalError` (-32603) when more items remain and the page
+ *   size in effect is not a positive safe integer, propagated from {@link encodeCursor}
  * @example
  * const allItems = ['a', 'b', 'c', 'd', 'e'];
  *
