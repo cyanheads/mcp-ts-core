@@ -2,7 +2,11 @@
  * @fileoverview Unit tests for parseEnvConfig helper.
  * @module tests/unit/config/parseEnvConfig.test
  */
-import { describe, expect, it } from 'vitest';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 
 import { parseEnvConfig } from '../../../src/config/parseEnvConfig.js';
@@ -224,17 +228,179 @@ describe('parseEnvConfig', () => {
   });
 
   it('defaults to process.env when env argument is omitted', () => {
+    // Reading process.env reaches the .env load; keep it off the developer's file.
+    const load = vi.spyOn(process, 'loadEnvFile').mockImplementation(() => {});
     const prev = process.env.MY_API_KEY;
     process.env.MY_API_KEY = 'from-process';
     try {
       const result = parseEnvConfig(Schema, envMap);
       expect(result.apiKey).toBe('from-process');
     } finally {
+      load.mockRestore();
       if (prev === undefined) {
         delete process.env.MY_API_KEY;
       } else {
         process.env.MY_API_KEY = prev;
       }
     }
+  });
+});
+
+describe('parseEnvConfig reads ./.env before process.env (#634)', () => {
+  const RUNTIME_MODULE = '../../../src/utils/internal/runtime.js';
+  /** The object `process.loadEnvFile()` writes to; tests below make it `process.env`. */
+  const liveEnv = process.env;
+  const KEYS = ['ENVFILE_PROBE_API_KEY', 'ENVFILE_PROBE_BASE_DIR'] as const;
+  const ProbeSchema = z.object({
+    apiKey: z.string(),
+    baseDir: z.string().optional(),
+  });
+  const probeMap = { apiKey: 'ENVFILE_PROBE_API_KEY', baseDir: 'ENVFILE_PROBE_BASE_DIR' };
+
+  const tempDirs: string[] = [];
+  const saved = new Map<string, string | undefined>();
+
+  /** A fresh directory, removed after the test, holding `.env` as a file with `contents` or as a directory. */
+  const envDir = (contents: string | 'directory'): string => {
+    const dir = mkdtempSync(join(tmpdir(), 'mcp-parse-env-'));
+    tempDirs.push(dir);
+    if (contents === 'directory') mkdirSync(join(dir, '.env'));
+    else writeFileSync(join(dir, '.env'), contents);
+    return dir;
+  };
+
+  /**
+   * Runs `fn` with `dir` as the working directory, so the unmocked
+   * `process.loadEnvFile()` reads `<dir>/.env`. Synchronous, so nothing else
+   * runs while the directory is changed.
+   */
+  const inDir = <T>(dir: string, fn: () => T): T => {
+    const previous = process.cwd();
+    process.chdir(dir);
+    try {
+      return fn();
+    } finally {
+      process.chdir(previous);
+    }
+  };
+
+  /** Fresh module instances: the loaded-once flag is module state. */
+  const freshModules = async () => {
+    vi.resetModules();
+    const [{ parseEnvConfig: parse }, { parseConfig }] = await Promise.all([
+      import('../../../src/config/parseEnvConfig.js'),
+      import('../../../src/config/index.js'),
+    ]);
+    return { parse, parseConfig };
+  };
+
+  beforeEach(() => {
+    for (const key of KEYS) {
+      saved.set(key, liveEnv[key]);
+      delete liveEnv[key];
+    }
+    process.env = liveEnv;
+  });
+
+  afterEach(() => {
+    vi.doUnmock(RUNTIME_MODULE);
+    vi.restoreAllMocks();
+    process.env = liveEnv;
+    for (const [key, value] of saved) {
+      if (value === undefined) delete liveEnv[key];
+      else liveEnv[key] = value;
+    }
+    saved.clear();
+    for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  // #562's scenario: a server-config read before createApp() — a module-scope
+  // gate, a z.lazy bound — sees a value set only in .env.
+  it('sees a value set only in .env when no env argument is passed', async () => {
+    const dir = envDir('ENVFILE_PROBE_API_KEY=from-dotenv\nENVFILE_PROBE_BASE_DIR=/srv/repos\n');
+    const { parse } = await freshModules();
+
+    const result = inDir(dir, () => parse(ProbeSchema, probeMap));
+
+    expect(result).toEqual({ apiKey: 'from-dotenv', baseDir: '/srv/repos' });
+  });
+
+  it('loads .env when passed process.env explicitly', async () => {
+    const dir = envDir('ENVFILE_PROBE_API_KEY=from-dotenv\n');
+    const { parse } = await freshModules();
+
+    expect(inDir(dir, () => parse(ProbeSchema, probeMap, process.env)).apiKey).toBe('from-dotenv');
+  });
+
+  it('keeps a value already in the process environment over .env', async () => {
+    const dir = envDir('ENVFILE_PROBE_API_KEY=from-dotenv\nENVFILE_PROBE_BASE_DIR=/srv/repos\n');
+    liveEnv.ENVFILE_PROBE_BASE_DIR = '/from-process';
+    const { parse } = await freshModules();
+
+    const result = inDir(dir, () => parse(ProbeSchema, probeMap));
+
+    expect(result).toEqual({ apiKey: 'from-dotenv', baseDir: '/from-process' });
+  });
+
+  it('never loads .env when reading an env object other than process.env', async () => {
+    const load = vi.spyOn(process, 'loadEnvFile');
+    const { parse } = await freshModules();
+
+    expect(parse(ProbeSchema, probeMap, { ENVFILE_PROBE_API_KEY: 'given' }).apiKey).toBe('given');
+    expect(load).not.toHaveBeenCalled();
+  });
+
+  it('loads .env at most once together with framework config', async () => {
+    const load = vi.spyOn(process, 'loadEnvFile').mockImplementation(() => {
+      liveEnv.ENVFILE_PROBE_API_KEY ??= 'from-dotenv';
+    });
+    const { parse, parseConfig } = await freshModules();
+
+    parse(ProbeSchema, probeMap);
+    expect(load).toHaveBeenCalledTimes(1);
+    parseConfig();
+    parse(ProbeSchema, probeMap);
+    expect(load).toHaveBeenCalledTimes(1);
+  });
+
+  it('never throws a .env load failure, which the next framework config read retries and reports', async () => {
+    const dir = envDir('directory');
+    liveEnv.ENVFILE_PROBE_API_KEY = 'from-process';
+    const load = vi.spyOn(process, 'loadEnvFile');
+    const { parse, parseConfig } = await freshModules();
+
+    const outcome = inDir(dir, () => {
+      const parsed = parse(ProbeSchema, probeMap);
+      let configError: unknown;
+      try {
+        parseConfig();
+      } catch (error) {
+        configError = error;
+      }
+      return { parsed, configError };
+    });
+
+    expect(outcome.parsed.apiKey).toBe('from-process');
+    // A fresh module graph has its own McpError class, so match the fields.
+    expect(outcome.configError).toMatchObject({
+      code: JsonRpcErrorCode.ConfigurationError,
+      message: 'Failed to load .env from the working directory.',
+    });
+    expect(load).toHaveBeenCalledTimes(2);
+  });
+
+  it('never loads .env on a Worker', async () => {
+    const load = vi.spyOn(process, 'loadEnvFile').mockImplementation(() => {});
+    vi.resetModules();
+    vi.doMock(RUNTIME_MODULE, async (importOriginal) => {
+      const actual =
+        await importOriginal<typeof import('../../../src/utils/internal/runtime.js')>();
+      return { runtimeCaps: { ...actual.runtimeCaps, isWorkerLike: true } };
+    });
+    const { parseEnvConfig: workerParse } = await import('../../../src/config/parseEnvConfig.js');
+    liveEnv.ENVFILE_PROBE_API_KEY = 'from-bindings';
+
+    expect(workerParse(ProbeSchema, probeMap).apiKey).toBe('from-bindings');
+    expect(load).not.toHaveBeenCalled();
   });
 });

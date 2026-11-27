@@ -8,6 +8,7 @@
 import type { z } from 'zod';
 
 import { configurationError } from '../types-global/errors.js';
+import { preloadEnvFile } from './envFile.js';
 import { formatEnvIssues, toEnvIssues } from './envIssue.js';
 import { emptyStringAsUndefined } from './envValue.js';
 
@@ -61,11 +62,22 @@ import { emptyStringAsUndefined } from './envValue.js';
  * (`MY_ENDPOINTS (endpoints.0.url)`). A root-level `.refine()` issue has no
  * field to attribute and is reported under its empty path.
  *
+ * Reading `process.env`, it first loads `./.env` from the working directory,
+ * the same once-per-process load framework config uses, so a call made before
+ * `createApp()` — a module-scope `disabledTool()` gate, a `z.lazy` bound —
+ * sees `.env` values under Node as it does under Bun. Values already in the
+ * process environment win. A `.env` that exists but cannot be loaded is never
+ * this function's error: `createApp()` retries the load and reports it through
+ * the startup banner. A script or test that never calls `createApp()` gets the
+ * failure from its next framework config read (`parseConfig()`, the `config`
+ * proxy), and not at all if it makes none.
+ *
  * @param schema - Zod schema describing the server config shape.
  * @param envMap - Maps top-level schema keys to their env var names. Every
  *   issue under a key — the key's own value or anything nested in it — is
  *   attributed to that key's variable.
- * @param env - Source of env values. Defaults to `process.env`; override for testing.
+ * @param env - Source of env values. Defaults to `process.env`; any other
+ *   object (a test fixture, Worker bindings) is read as given, with no `.env` load.
  * @returns Parsed, validated config typed as `z.infer<T>`.
  * @throws {McpError} With `ConfigurationError` code if validation fails.
  */
@@ -74,6 +86,8 @@ export function parseEnvConfig<T extends z.ZodType>(
   envMap: Record<string, string>,
   env: Record<string, string | undefined> = typeof process !== 'undefined' ? process.env : {},
 ): z.infer<T> {
+  if (typeof process !== 'undefined' && env === process.env) preloadEnvFile();
+
   // Null-prototype, so a schema key like `constructor` reads as absent rather than inherited.
   const input: Record<string, unknown> = Object.create(null);
   for (const [key, envVar] of Object.entries(envMap)) {

@@ -1,6 +1,6 @@
 # mcp-ts-core - Directory Structure
 
-Generated on: 2026-11-26 10:43:57
+Generated on: 2026-11-27 00:46:42
 
 ```text
 mcp-ts-core/
@@ -291,6 +291,7 @@ mcp-ts-core/
 │   │   └── init.ts
 │   ├── config/
 │   │   ├── appRoot.ts
+│   │   ├── envFile.ts
 │   │   ├── envIssue.ts
 │   │   ├── envValue.ts
 │   │   ├── index.ts
@@ -737,6 +738,7 @@ mcp-ts-core/
 │   │   ├── bad-env-import.int.test.ts
 │   │   ├── cache-hints.int.test.ts
 │   │   ├── completions.int.test.ts
+│   │   ├── env-file.int.test.ts
 │   │   ├── http-auth-sessions.test.ts
 │   │   ├── http-auth.test.ts
 │   │   ├── http-authz.e2e.test.ts
@@ -830,6 +832,7 @@ mcp-ts-core/
 │   │   │   └── parseEnvConfig.test.ts
 │   │   ├── core/
 │   │   │   ├── app.compose.test.ts
+│   │   │   ├── app.dotenv.test.ts
 │   │   │   ├── app.sessionMode.test.ts
 │   │   │   ├── app.test.ts
 │   │   │   ├── context-state-bounds.test.ts

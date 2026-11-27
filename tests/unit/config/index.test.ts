@@ -2,7 +2,15 @@
  * @fileoverview Unit tests for configuration parsing.
  * @module tests/config/index.test
  */
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -360,9 +368,17 @@ describe('config parsing', () => {
     });
 
     expect(parsed.environment).toBe('development');
-    expect(parsed.logLevel).toBe('debug');
+    expect(parsed.logLevel).toBe('info');
     expect(parsed.mcpHttpPort).toBe(3010);
     expect(parsed.storage).toEqual({ providerType: 'in-memory', filesystemPath: './.storage' });
+  });
+
+  it.each([
+    ['unset', undefined],
+    ['empty', ''],
+    ['whitespace only', '   '],
+  ])('defaults the log level to info when MCP_LOG_LEVEL is %s (#705)', (_label, value) => {
+    expect(parseConfig({ MCP_LOG_LEVEL: value }).logLevel).toBe('info');
   });
 
   it.each([
@@ -971,6 +987,7 @@ describe('config parsing', () => {
 });
 
 describe('.env loading', () => {
+  const RUNTIME_MODULE = '../../../src/utils/internal/runtime.js';
   const errnoError = (code: string) => Object.assign(new Error(code), { code });
 
   /** Fresh module instance — the loaded-once flag is module state. */
@@ -979,9 +996,152 @@ describe('.env loading', () => {
     return (await import('../../../src/config/index.js')).parseConfig;
   };
 
+  /**
+   * Runs `fn` with `dir` as the working directory and the live env object as
+   * `process.env`, so the unmocked `process.loadEnvFile()` reads `<dir>/.env`
+   * and its writes are what the parse sees. Synchronous, so nothing else runs
+   * while the directory is changed.
+   */
+  const inDir = <T>(dir: string, fn: () => T): T => {
+    const previous = process.cwd();
+    process.env = liveEnv;
+    process.chdir(dir);
+    try {
+      return fn();
+    } finally {
+      process.chdir(previous);
+    }
+  };
+
+  const tempDirs: string[] = [];
+  /** A fresh directory, removed after the test, holding `.env` as a file with `contents` or as a directory. */
+  const envDir = (contents: string | 'directory'): string => {
+    const dir = mkdtempSync(join(tmpdir(), 'mcp-env-'));
+    tempDirs.push(dir);
+    if (contents === 'directory') mkdirSync(join(dir, '.env'));
+    else writeFileSync(join(dir, '.env'), contents);
+    return dir;
+  };
+
+  /** Catches what `fn` throws, for assertions on a synchronous failure. */
+  const thrownBy = (fn: () => unknown): unknown => {
+    try {
+      fn();
+    } catch (error) {
+      return error;
+    }
+    return undefined;
+  };
+
   afterEach(() => {
+    vi.doUnmock(RUNTIME_MODULE);
     vi.restoreAllMocks();
     process.env = { ...originalEnv };
+    for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('reads .env from the working directory', async () => {
+    const dir = envDir('MCP_HTTP_HOST=10.0.0.7\n');
+    const parse = await freshParseConfig();
+    delete liveEnv.MCP_HTTP_HOST;
+
+    try {
+      expect(inDir(dir, () => parse()).mcpHttpHost).toBe('10.0.0.7');
+    } finally {
+      delete liveEnv.MCP_HTTP_HOST;
+    }
+  });
+
+  // POSIX permission bits; root reads a mode-000 file anyway.
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'stops on a .env that exists but cannot be read, which Node reports as ENOENT',
+    async () => {
+      const dir = envDir('MCP_HTTP_HOST=10.0.0.7\n');
+      chmodSync(join(dir, '.env'), 0o000);
+      const parse = await freshParseConfig();
+
+      const thrown = inDir(dir, () => thrownBy(() => parse()));
+
+      // A fresh module graph has its own McpError class, so match the fields.
+      expect(thrown).toMatchObject({
+        code: JsonRpcErrorCode.ConfigurationError,
+        message: 'Failed to load .env from the working directory.',
+      });
+      expect((thrown as McpError).cause).toBeDefined();
+    },
+  );
+
+  // POSIX permission bits; root searches a mode-000 directory anyway.
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'stops on a .env symlink whose target sits in a directory the process cannot search',
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), 'mcp-env-'));
+      tempDirs.push(dir);
+      const locked = join(dir, 'secrets');
+      mkdirSync(locked);
+      writeFileSync(join(locked, 'app.env'), 'MCP_HTTP_HOST=10.0.0.7\n');
+      symlinkSync(join('secrets', 'app.env'), join(dir, '.env'));
+      chmodSync(locked, 0o000);
+      const parse = await freshParseConfig();
+
+      try {
+        const thrown = inDir(dir, () => thrownBy(() => parse()));
+
+        expect(thrown).toMatchObject({
+          code: JsonRpcErrorCode.ConfigurationError,
+          message: 'Failed to load .env from the working directory.',
+        });
+      } finally {
+        chmodSync(locked, 0o755);
+      }
+    },
+  );
+
+  it('treats a .env symlink to a missing target as no .env', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'mcp-env-'));
+    tempDirs.push(dir);
+    symlinkSync(join(dir, 'gone.env'), join(dir, '.env'));
+    const parse = await freshParseConfig();
+
+    expect(inDir(dir, () => thrownBy(() => parse()))).toBeUndefined();
+  });
+
+  it('stops on a .env that is a directory', async () => {
+    const dir = envDir('directory');
+    const parse = await freshParseConfig();
+
+    const thrown = inDir(dir, () => thrownBy(() => parse()));
+
+    expect(thrown).toMatchObject({
+      code: JsonRpcErrorCode.ConfigurationError,
+      message: 'Failed to load .env from the working directory.',
+    });
+  });
+
+  it('never reads .env on a Worker', async () => {
+    const load = vi.spyOn(process, 'loadEnvFile').mockImplementation(() => {});
+    vi.resetModules();
+    vi.doMock(RUNTIME_MODULE, async (importOriginal) => {
+      const actual =
+        await importOriginal<typeof import('../../../src/utils/internal/runtime.js')>();
+      return { runtimeCaps: { ...actual.runtimeCaps, isWorkerLike: true } };
+    });
+    const { parseConfig: workerParse } = await import('../../../src/config/index.js');
+
+    workerParse();
+
+    expect(load).not.toHaveBeenCalled();
+  });
+
+  it('retries the load on the next parse after a failure', async () => {
+    const load = vi.spyOn(process, 'loadEnvFile').mockImplementation(() => {
+      throw new TypeError('Contents of .env should be a valid string.');
+    });
+    const parse = await freshParseConfig();
+
+    expect(() => parse()).toThrow('Failed to load .env from the working directory.');
+    expect(() => parse()).toThrow('Failed to load .env from the working directory.');
+    expect(load).toHaveBeenCalledTimes(2);
   });
 
   it('loads .env values without overriding variables already set', async () => {
@@ -1006,13 +1166,17 @@ describe('.env loading', () => {
   });
 
   it('loads the file once and tolerates a missing .env', async () => {
-    const load = vi.spyOn(process, 'loadEnvFile').mockImplementation(() => {
-      throw errnoError('ENOENT');
-    });
+    // A real missing file in an empty directory: whether `.env` exists decides
+    // what an ENOENT means, so the repo root's contents must not leak in.
+    const dir = mkdtempSync(join(tmpdir(), 'mcp-env-'));
+    tempDirs.push(dir);
+    const load = vi.spyOn(process, 'loadEnvFile');
     const parse = await freshParseConfig();
 
-    expect(() => parse()).not.toThrow();
-    parse();
+    inDir(dir, () => {
+      expect(() => parse()).not.toThrow();
+      parse();
+    });
     expect(load).toHaveBeenCalledTimes(1);
   });
 

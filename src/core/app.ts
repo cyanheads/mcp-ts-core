@@ -14,6 +14,7 @@ import {
 } from '@modelcontextprotocol/server';
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { z } from 'zod';
+import { loadEnvFile, preloadEnvFile } from '@/config/envFile.js';
 import { config, normalizeEnv, resetConfig } from '@/config/index.js';
 import { startGcPressureLoop } from '@/core/gcPressure.js';
 import {
@@ -539,6 +540,10 @@ export async function composeServices<TSupabaseClient extends object = SupabaseC
   // indication of which option carries it.
   assertValidCacheHints(cacheHints, resources);
 
+  // The raw MCP_SESSION_MODE and OTEL_SERVICE_* reads below can run before any
+  // config parse, and a .env value they miss loses to the option it overrides.
+  preloadEnvFile();
+
   const sessionMode = normalizeSessionModeOption(options.sessionMode);
   // The option is a default, so it applies only where the environment supplies
   // nothing meaningful; an explicit MCP_SESSION_MODE always wins.
@@ -857,6 +862,9 @@ function assertSupportedNodeVersion(): void {
 export async function createApp<TSupabaseClient extends object = SupabaseClientHandle>(
   options: CreateAppOptions<TSupabaseClient> = {},
 ): Promise<ServerHandle<TSupabaseClient>> {
+  // suppressColors() reads MCP_TRANSPORT_TYPE raw, ahead of the error boundary
+  // below; a load failure here is reported inside it.
+  preloadEnvFile();
   suppressColors();
 
   // --- Compose services (handles env overrides internally for config parsing) ---
@@ -869,6 +877,10 @@ export async function createApp<TSupabaseClient extends object = SupabaseClientH
   let composed: ComposedApp<TSupabaseClient>;
   try {
     assertSupportedNodeVersion();
+    // Retries a load the preload above deferred, so a .env that cannot load
+    // reaches the banner even when no config parse follows (a config cached by
+    // resetConfig(overrides)). A no-op once the file has loaded.
+    loadEnvFile();
     // stdout carries only JSON-RPC under stdio, so console output from core
     // service startup and setup() goes to stderr as well. Reading the transport
     // parses the config, so an invalid environment fails here, through the

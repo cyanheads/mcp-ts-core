@@ -115,7 +115,7 @@ describe('ctx.log wire mirror follows the process log level check', () => {
     expect(wireLog.mock.calls).toEqual([['debug', { message: 'after setLevel' }]]);
   });
 
-  it('mirrors every level, payload unchanged, at the default debug level', async () => {
+  it('mirrors every level, payload unchanged, at the debug level', async () => {
     await logger.initialize('debug');
     const { ctx, wireLog } = buildWireCtx();
 

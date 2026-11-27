@@ -15,6 +15,7 @@ import packageJson from '../../package.json' with { type: 'json' };
 import { configurationError } from '../types-global/errors.js';
 import { runtimeCaps } from '../utils/internal/runtime.js';
 import { type PackageManifest, resolveAppRoot } from './appRoot.js';
+import { loadEnvFile } from './envFile.js';
 import { formatEnvIssues, toEnvIssues } from './envIssue.js';
 import { emptyStringAsUndefined, normalizeEnv } from './envValue.js';
 import { normalizeLogLevelAlias } from './logLevelAlias.js';
@@ -24,30 +25,6 @@ const frameworkPkg = packageJson as PackageManifest;
 /** Framework identity — sourced from the package's own package.json. */
 export const FRAMEWORK_NAME = '@cyanheads/mcp-ts-core';
 export const FRAMEWORK_VERSION = frameworkPkg.version ?? '0.0.0';
-
-// Lazy .env loading — deferred to first parseConfig() call.
-// Top-level execution loads a stale .env before test setup can configure the
-// environment.
-let _envFileLoaded = false;
-
-/**
- * Loads `./.env` (relative to the working directory) into `process.env` via
- * Node's native `process.loadEnvFile()`. Variables already set are never
- * overridden. A missing file is the normal case and is ignored; any other read
- * failure is surfaced rather than silently leaving the server unconfigured.
- */
-function loadEnvFile(): void {
-  try {
-    process.loadEnvFile();
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
-    throw configurationError(
-      'Failed to load .env from the working directory.',
-      { cwd: process.cwd() },
-      { cause: error },
-    );
-  }
-}
 
 // --- Helper Functions ---
 /**
@@ -234,7 +211,7 @@ const ConfigSchema = z
         },
         z.enum(['debug', 'info', 'notice', 'warning', 'error', 'crit', 'alert', 'emerg']),
       )
-      .default('debug'),
+      .default('info'),
     logsPath: z.string().optional(), // Made optional as it's Node-specific
     /**
      * When `true`, persists full LLM request/response transcripts to
@@ -644,11 +621,8 @@ const WorkerConfigWithoutEnvironmentSchema = ConfigSchema.superRefine((data, ctx
 
 // --- Parsing Logic ---
 const parseConfig = (envOverrides?: Record<string, string | undefined>) => {
-  // Lazy .env loading — only in a real Node/Bun process, only once, only when not using overrides
-  if (!_envFileLoaded && runtimeCaps.isNode && !runtimeCaps.isWorkerLike && !envOverrides) {
-    loadEnvFile();
-    _envFileLoaded = true;
-  }
+  // Overrides make the parse explicit, so only a parse of the process environment reads .env.
+  if (!envOverrides) loadEnvFile();
 
   // Empty strings and unsubstituted `${…}` placeholders read as unset for
   // every field, so a blank `.env` line or a host-forwarded placeholder falls
