@@ -2,6 +2,10 @@
 
 All notable changes to this project. Each entry links to its full per-version file in [changelog/](changelog/).
 
+## [0.13.24](changelog/0.13.x/0.13.24.md) — 2026-11-26
+
+.env loads before server config reads under Node, a declared retryable reaches service throws, runToolContract and the fuzz helpers handle ctx.requestInput, decodeCursor tightens its validation and echo, and devcheck scans untracked files. MCP_LOG_LEVEL now defaults to info.
+
 ## [0.13.23](changelog/0.13.x/0.13.23.md) — 2026-11-26 · 🛡️ Security
 
 fetchWithTimeout follows redirects the same way on Node, Bun, and workerd, stdio keeps console output off the JSON-RPC stream, and defects in the SQLite mirror, DuckDB canvas, pacer, and Markdown escaping are fixed. Tests and scaffolds move to Vitest 5.
