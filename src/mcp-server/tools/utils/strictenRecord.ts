@@ -13,10 +13,12 @@
  * here on the way past. The record is a symbol-keyed, non-enumerable property:
  * invisible to `Object.keys`, `JSON.stringify`, a spread, `tools/list`, the
  * server manifest and `_meta` alike, so nothing about what a client sees
- * changes. The symbol comes from the global registry rather than a module
- * binding, because `lint:mcp` can load the framework twice — the linter from
- * the installed package, the definitions from wherever the server imports them
- * — and a module-local key (or a `WeakMap`) would not be shared across the two.
+ * changes. Because a spread drops it, `disabledTool()` copies a definition
+ * from its property descriptors, which keep it (#688). The symbol comes from
+ * the global registry rather than a module binding, because `lint:mcp` can
+ * load the framework twice — the linter from the installed package, the
+ * definitions from wherever the server imports them — and a module-local key
+ * (or a `WeakMap`) would not be shared across the two.
  *
  * Re-applying the discarded entry to the strictened schema is separate, held
  * work: it would change the advertised `inputSchema` bytes. This half changes

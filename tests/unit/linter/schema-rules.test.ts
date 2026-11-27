@@ -23,6 +23,7 @@ import {
 } from '@/linter/rules/schema-rules.js';
 import { lintToolDefinition } from '@/linter/rules/tool-rules.js';
 import { validateDefinitions } from '@/linter/validate.js';
+import { disabledTool } from '@/mcp-server/tools/utils/disabled-tool.js';
 import { headerParam } from '@/mcp-server/tools/utils/headerParam.js';
 import { tool } from '@/mcp-server/tools/utils/toolDefinition.js';
 
@@ -927,6 +928,46 @@ describe('checkStrictenedRootMeta', () => {
       expect(discarded(`lint_${label}_root`, input)).toHaveLength(0);
     },
   );
+
+  // #688 — a disabled tool keeps the record, so lint:mcp reports what it reports for the original.
+  it.each([
+    [
+      'a described object root',
+      z.object({ x: z.string().describe('x') }).describe('An object root.'),
+    ],
+    [
+      'a .meta() root',
+      z
+        .object({ a: z.string().optional().describe('a') })
+        .meta({ anyOf: [{ type: 'object', required: ['a'] }] }),
+    ],
+    [
+      'a described union root with a described variant',
+      z
+        .discriminatedUnion('mode', [
+          z
+            .object({ mode: z.literal('a').describe('m'), a: z.string().describe('a') })
+            .describe('Branch A.'),
+          z.object({ mode: z.literal('b').describe('m'), b: z.string().describe('b') }),
+        ])
+        .describe('A union root.'),
+    ],
+  ])('reports the same warnings for a disabled tool with %s', (_label, input) => {
+    const def = tool('lint_disabled_root', {
+      description: 'Minimal repro.',
+      input: input as never,
+      output: ok,
+      handler: pass,
+    });
+    const rootMeta = (definition: unknown) =>
+      validateDefinitions({ tools: [definition as never] }).warnings.filter(
+        (d) => d.rule === 'schema-root-meta-discarded',
+      );
+
+    const expected = rootMeta(def);
+    expect(expected.length).toBeGreaterThan(0);
+    expect(rootMeta(disabledTool(def, { reason: 'Off in this deployment.' }))).toEqual(expected);
+  });
 
   it('stays silent when every union variant already declares a catchall', () => {
     const messages = discarded(

@@ -17,6 +17,13 @@
  *     });
  * ```
  *
+ * A gate at module scope parses all server config at import, so an invalid
+ * value in any server variable exits on the raw `ConfigurationError` stack
+ * (variable named, exit 1) instead of the startup banner; where the banner
+ * matters, gate on a one-field accessor whose schema `.catch()`es to the safe
+ * value, and keep the full `getServerConfig()` in `setup()` (`add-tool` skill,
+ * § Feature-flagged tools).
+ *
  * The wrapper deliberately leaves the public `ToolDefinition` interface and
  * the `tool()` builder untouched — `disabled` is an internal-facing field
  * that only the registry, manifest, and landing renderer read.
@@ -64,14 +71,21 @@ const DISABLED_KEY = '__mcpDisabled' as const;
  * every property of the original (so the linter, manifest, and schema preview
  * all keep working) and adds an internal `__mcpDisabled` field that the
  * registry checks before deciding whether to register the tool with the MCP
- * server.
+ * server. The copy is built from the original's own property descriptors, so
+ * the non-enumerable strictening record `tool()` attaches (see
+ * `strictenRecord.ts`) carries over, which a spread would drop. The original is
+ * not mutated.
  *
  * @param def  The original tool definition.
  * @param meta The reason (and optional hint) shown on the landing page.
- * @returns The same definition with the disabled marker attached.
+ * @returns A copy of the definition with the disabled marker attached.
  */
 export function disabledTool<TDef extends AnyToolDef>(def: TDef, meta: DisabledMetadata): TDef {
-  return { ...def, [DISABLED_KEY]: meta } as TDef;
+  const copy = Object.defineProperties({}, Object.getOwnPropertyDescriptors(def)) as TDef & {
+    [DISABLED_KEY]?: DisabledMetadata;
+  };
+  copy[DISABLED_KEY] = meta;
+  return copy;
 }
 
 /**
