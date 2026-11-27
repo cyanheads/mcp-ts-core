@@ -93,6 +93,63 @@ describe('Error Handler Mappings', () => {
       const b = getCompiledPattern('input-beta');
       expect(a).not.toBe(b);
     });
+
+    // Issue #676 — a string pattern is a substring, its metacharacters literal.
+    describe('string patterns as literal substrings (#676)', () => {
+      it.each([
+        ['$5', 'Charge of $5 was declined'],
+        ['foo(', 'x FOO( y'],
+        ['C++', 'c++ compiler crashed'],
+        ['a.b', 'host A.B refused'],
+        ['not found|missing', 'lookup NOT FOUND|MISSING here'],
+        ['^quota', 'over ^QUOTA today'],
+      ])('matches %j wherever it appears as text, in any case', (pattern, text) => {
+        expect(getCompiledPattern(pattern).test(text)).toBe(true);
+      });
+
+      it.each([
+        ['a.b', 'status axb'],
+        ['not found|missing', 'record missing'],
+        ['^quota', 'Quota exceeded today'],
+        ['colou?r', 'color'],
+        ['[0-9]', 'item 7'],
+      ])('does not read %j as a regular expression against %j', (pattern, text) => {
+        expect(getCompiledPattern(pattern).test(text)).toBe(false);
+      });
+    });
+
+    describe('cache keys (#676)', () => {
+      // `slashprobe/i` spells the RegExp's source, delimiter, and flags, so only
+      // the key's kind prefix keeps the two apart.
+      it.each([
+        ['its source and flags', 'kindprobei', /kindprobe/i],
+        ['its source, a slash, and its flags', 'slashprobe/i', /slashprobe/i],
+      ])('keeps a string apart from a RegExp when the string spells %s', (_label, text, regExp) => {
+        const fromString = getCompiledPattern(text);
+        const fromRegExp = getCompiledPattern(regExp);
+        const sample = `a ${regExp.source.toUpperCase()} b`;
+
+        expect(fromRegExp).not.toBe(fromString);
+        expect(fromRegExp.test(sample)).toBe(true);
+        expect(fromString.test(sample)).toBe(false);
+      });
+
+      it('keeps a RegExp’s source apart from its flags', () => {
+        const wide = getCompiledPattern(/delimai/);
+        const narrow = getCompiledPattern(/delima/i);
+
+        expect(narrow).not.toBe(wide);
+        expect(narrow.test('DELIMA')).toBe(true);
+        expect(wide.test('DELIMA')).toBe(false);
+      });
+    });
+
+    it('compiles a RegExp with its own source and flags, g and y removed and i added (#676)', () => {
+      const regex = getCompiledPattern(/flag-probe\d+/gmsuy);
+
+      expect(regex.source).toBe('flag-probe\\d+');
+      expect(regex.flags).toBe('imsu');
+    });
   });
 
   // ─── ERROR_TYPE_MAPPINGS ─────────────────────────────────────────────────────

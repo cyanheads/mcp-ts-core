@@ -203,10 +203,13 @@ export function createToolHandler(
       // instead, and it arrives below as an `McpError`.
       if (isInputRequiredSignal(error)) return error.result;
 
-      // One reason-to-entry lookup: the declared recovery fills a failure that
-      // carries none (#579) and the entry's severity sets the log level (#380,
-      // #567). Filled before `handleError`, so the error record, the envelope,
-      // and the failure-payload record carry the same hint.
+      /**
+       * One reason-to-entry lookup: the declared recovery and retryable each
+       * fill a failure that sets none of its own (#579, #856), and the entry's
+       * severity sets the log level (#380, #567). Filled before `handleError`,
+       * so the error record, the envelope, and the failure-payload record carry
+       * the same hint and `retryable`.
+       */
       const { entry, failure } = resolveDeclaredFailure(def.errors, error);
       // Read once, through a copy: the failure may be a thrown value whose
       // `data` cannot be read (#697).

@@ -4535,6 +4535,105 @@ describe('createToolHandler', () => {
           .success,
       ).toBe(true);
     });
+
+    describe('the entry’s retryable (#856)', () => {
+      const HINT = 'Retry once the upstream is back.';
+
+      /** `upstream_unavailable`, produced by the service, declaring `retryable` as given. */
+      const declaring = (retryable?: boolean) => [
+        {
+          reason: 'upstream_unavailable',
+          code: JsonRpcErrorCode.ServiceUnavailable,
+          when: 'The upstream returned 503.',
+          recovery: RECOVERY,
+          ...(retryable !== undefined && { retryable }),
+          thrownBy: 'service' as const,
+        },
+      ];
+
+      /** The declared reason as a service raises it, `extra` merged into its data. */
+      const serviceThrow = (extra: Record<string, unknown> = {}) =>
+        new McpError(JsonRpcErrorCode.ServiceUnavailable, 'Upstream returned 503.', {
+          reason: 'upstream_unavailable',
+          ...extra,
+        });
+
+      /** The envelope's `data`, read as the open record it is on the wire. */
+      const wireData = (result: CallToolResult) =>
+        (envelope(result).data ?? {}) as Record<string, unknown>;
+
+      /** The `Error in tool:fill_probe` record's `errorData`. */
+      const loggedErrorData = () =>
+        (
+          vi
+            .mocked(mockLogger.error)
+            .mock.calls.findLast(([message]) =>
+              String(message).startsWith('Error in tool:fill_probe'),
+            )?.[1] as Record<string, any> | undefined
+        )?.extra.errorData;
+
+      it.each([
+        [true, 'retryable', {}, RECOVERY],
+        [false, 'not retryable', { recovery: { hint: HINT } }, HINT],
+      ])(
+        'puts an entry’s retryable %s on a service throw, beside the hint it ends with',
+        async (retryable, term, extra, hint) => {
+          const thrown = serviceThrow(extra);
+
+          const result = await failWith(() => thrown, declaring(retryable));
+
+          expect(wireData(result).retryable).toBe(retryable);
+          expect(envelope(result).data?.recovery).toEqual({ hint });
+          expect(text(result)).toContain(`(reason upstream_unavailable · ${term} · request `);
+          expect(loggedErrorData()?.retryable).toBe(retryable);
+          expect(thrown.data).toEqual({ reason: 'upstream_unavailable', ...extra });
+        },
+      );
+
+      it('keeps a throw-site retryable over the entry’s', async () => {
+        const result = await failWith(() => serviceThrow({ retryable: true }), declaring(false));
+
+        expect(wireData(result).retryable).toBe(true);
+        expect(text(result)).toContain('(reason upstream_unavailable · retryable · request ');
+      });
+
+      it('adds no retryable key for an entry that declares none', async () => {
+        const result = await failWith(() => serviceThrow(), declaring());
+
+        expect(Object.hasOwn(wireData(result), 'retryable')).toBe(false);
+        expect(text(result)).toContain('(reason upstream_unavailable · request ');
+      });
+
+      it('puts a declared invalid_arguments retryable on the argument rejection, its synthesized hint kept', async () => {
+        const def = tool('fill_reserved_retryable', {
+          description: 'Declares the framework reason with retryable.',
+          input: z.object({ query: z.string().describe('Search query.') }),
+          output: z.object({ ok: z.boolean().describe('ok') }),
+          errors: [
+            {
+              reason: 'invalid_arguments',
+              code: JsonRpcErrorCode.InvalidParams,
+              when: 'The arguments failed the schema.',
+              recovery: 'This declared hint must never replace the synthesized one.',
+              retryable: false,
+            },
+          ],
+          handler: () => ({ ok: true }),
+        });
+        const handler = createToolHandler(def as AnyToolDefinition, services, notifiers);
+
+        const result = (await handler(
+          { query: 'ok', salt: true },
+          makeServerContext(),
+        )) as CallToolResult;
+
+        expect(wireData(result).retryable).toBe(false);
+        expect(envelope(result).data?.recovery).toEqual({
+          hint: 'Unknown key salt. This tool accepts: query.',
+        });
+        expect(text(result)).toContain('(reason invalid_arguments · not retryable · request ');
+      });
+    });
   });
 
   // -----------------------------------------------------------------------

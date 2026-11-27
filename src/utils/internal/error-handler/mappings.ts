@@ -8,20 +8,25 @@ import { JsonRpcErrorCode } from '@/types-global/errors.js';
 import type { BaseErrorMapping } from './types.js';
 
 /**
- * Compiled regex cache for performance optimization.
- * Prevents repeated regex compilation on every error classification.
+ * Compiled patterns by kind-prefixed key, so classification never compiles one twice.
  * @private
  */
 const COMPILED_PATTERN_CACHE = new Map<string, RegExp>();
 
 /**
- * Compiles and caches a regex pattern for repeated use without re-compilation overhead.
+ * Compiles and caches a mapping pattern, case-insensitive either way.
  *
- * - String patterns are compiled with the `i` (case-insensitive) flag.
- * - `RegExp` patterns are re-compiled without the `g` flag (global flag is removed to prevent
- *   stateful `lastIndex` bugs when the same pattern is reused across multiple `.test()` calls)
- *   and with `i` added if absent.
- * - Cache key for `RegExp` inputs is `source + flags`; for strings it is the string itself.
+ * - A string is a literal substring, compiled from `RegExp.escape(pattern)` with `i`: a
+ *   metacharacter (`$5`, `foo(`, `C++`, `a.b`) matches as the text it is and never throws.
+ *   A string written as a regex (`'not found|missing'`, `'^quota'`) matches only that literal
+ *   text; pass a `RegExp` for regex semantics.
+ * - A `RegExp` keeps its source and flags, minus `g` and `y` — both make `.test()` resume
+ *   from `lastIndex`, so the cached instance would answer the same text differently on
+ *   alternate calls — plus `i`.
+ * - The cache key names the kind and separates a `RegExp`'s source from its flags
+ *   (`string:<pattern>`, `regexp:<source>/<flags>`), so `'abci'` and `/abc/i`, or `/ai/` and
+ *   `/a/i`, never share an entry. A `RegExp`'s `source` escapes `/`, so its last `/` is the
+ *   separator.
  *
  * @param pattern - A string or `RegExp` to compile and cache.
  * @returns The compiled, cached `RegExp` instance.
@@ -29,35 +34,24 @@ const COMPILED_PATTERN_CACHE = new Map<string, RegExp>();
  * @example
  * ```ts
  * const re = getCompiledPattern('not found');
- * re.test('Resource not found'); // → true
+ * re.test('Resource NOT FOUND'); // → true
+ *
+ * getCompiledPattern('$5').test('Charge of $5 declined'); // → true
  *
  * const re2 = getCompiledPattern(/ThrottlingException/i);
  * re2.test('ThrottlingException: rate exceeded'); // → true
  * ```
  */
 export function getCompiledPattern(pattern: string | RegExp): RegExp {
-  // Create a stable cache key
-  const cacheKey = pattern instanceof RegExp ? pattern.source + pattern.flags : pattern;
+  const cacheKey =
+    pattern instanceof RegExp ? `regexp:${pattern.source}/${pattern.flags}` : `string:${pattern}`;
+  const cached = COMPILED_PATTERN_CACHE.get(cacheKey);
+  if (cached) return cached;
 
-  // Return cached pattern if available
-  if (COMPILED_PATTERN_CACHE.has(cacheKey)) {
-    return COMPILED_PATTERN_CACHE.get(cacheKey) as RegExp;
-  }
-
-  // Compile new pattern
-  let compiled: RegExp;
-  if (pattern instanceof RegExp) {
-    // Remove global flag, ensure case-insensitive
-    let flags = pattern.flags.replace('g', '');
-    if (!flags.includes('i')) {
-      flags += 'i';
-    }
-    compiled = new RegExp(pattern.source, flags);
-  } else {
-    compiled = new RegExp(pattern, 'i');
-  }
-
-  // Cache for future use
+  const compiled =
+    pattern instanceof RegExp
+      ? new RegExp(pattern.source, `${pattern.flags.replace(/[giy]/g, '')}i`)
+      : new RegExp(RegExp.escape(pattern), 'i');
   COMPILED_PATTERN_CACHE.set(cacheKey, compiled);
   return compiled;
 }

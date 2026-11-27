@@ -1893,6 +1893,41 @@ describe('createResourceHandler', () => {
         expect(rejection.data).toEqual({ reason: 'gone', requestId: 'test-req-id' });
         expect(thrown.data).toEqual({ reason: 'gone' });
       });
+
+      it.each([
+        [false, undefined],
+        [true, 'Read fill://y instead.'],
+      ])(
+        'carries an entry’s retryable %s on a service throw, throw-site hint %s (#856)',
+        async (retryable, hint) => {
+          const thrown = new McpError(JsonRpcErrorCode.NotFound, 'Record x is gone.', {
+            reason: 'gone',
+            ...(hint && { recovery: { hint } }),
+          });
+
+          const rejection = await readFailing(
+            () => thrown,
+            [
+              {
+                reason: 'gone',
+                code: JsonRpcErrorCode.NotFound,
+                when: 'The record is gone.',
+                recovery: RECOVERY,
+                retryable,
+                thrownBy: 'service',
+              },
+            ],
+          );
+
+          expect(rejection.data).toEqual({
+            reason: 'gone',
+            retryable,
+            recovery: { hint: hint ?? RECOVERY },
+            requestId: 'test-req-id',
+          });
+          expect(Object.hasOwn(thrown.data ?? {}, 'retryable')).toBe(false);
+        },
+      );
     });
 
     describe('an SDK ProtocolError the handler throws (#583)', () => {

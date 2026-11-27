@@ -158,8 +158,14 @@ export interface BaseErrorMapping {
   errorCode: JsonRpcErrorCode;
 
   /**
-   * A string or regular expression to match against the error message.
-   * If a string is provided, it's used for substring matching (case-insensitive).
+   * A string or regular expression to match against the error's message and name,
+   * case-insensitively either way.
+   *
+   * A string is a literal substring: its regex metacharacters match as the characters
+   * they are, so `'$5'` matches `Charge of $5`, `'a.b'` matches `a.b` and not `axb`, and
+   * `'not found|missing'` matches only that text. Pass a `RegExp` for alternation,
+   * anchors, classes, or quantifiers. A `RegExp` is applied with its own flags, `i` added
+   * and `g` and `y` removed.
    */
   pattern: string | RegExp;
 }

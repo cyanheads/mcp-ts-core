@@ -295,10 +295,12 @@ export type ErrorContractSeverity = 'debug' | 'info' | 'notice' | 'warning';
  * - Set `retryable` on every entry where retry behavior matters. It drives two
  *   things: (1) `withRetry`'s default predicate fails fast when
  *   `data.retryable === false`, even for transient-coded errors — so deterministic
- *   failures don't hammer the upstream; (2) `ctx.fail` auto-populates
- *   `data.retryable` from the contract entry so no per-throw-site flag is needed.
- *   A caller can still override per-occurrence by passing `data.retryable`
- *   explicitly. When omitted, callers infer retryability from the code.
+ *   failures don't hammer the upstream; (2) every failure naming the reason
+ *   carries it as `data.retryable` without a per-throw-site flag — `ctx.fail`
+ *   writes it, and the tool and resource handler factories fill it on a service
+ *   throw carrying `data: { reason }`. A throw site can still override
+ *   per-occurrence by passing `data.retryable` explicitly. When omitted, callers
+ *   infer retryability from the code.
  *
  * @example
  * ```ts
@@ -359,11 +361,16 @@ export interface ErrorContract {
    * expensive to ever succeed) fail immediately without hammering the upstream
    * through all retry attempts.
    *
-   * **Auto-population via `ctx.fail`.** `createFail` uses the contract entry's
-   * `retryable` as a base default on `data.retryable`, so every `ctx.fail(reason)`
-   * call automatically carries the right flag — no per-throw-site flag needed.
-   * A caller can still override it per-occurrence by passing `data.retryable`
-   * explicitly; `reason` is always forced last regardless.
+   * **Auto-population.** The entry's `retryable` is the base default under the
+   * failure's own `data`, so a failure naming this reason carries it without a
+   * per-throw-site flag: `ctx.fail(reason)` writes it when it builds the error,
+   * and the tool and resource handler factories fill it on a failure that
+   * reaches them with no `data.retryable` — a service throw carrying `data: {
+   * reason }` — whether or not the throw site set its own `recovery`. A throw
+   * site can still override it per-occurrence by passing `data.retryable`
+   * explicitly, either way. The factory fill runs at the handler boundary, so a
+   * service's own `withRetry` sees only what the service threw; the thrown
+   * `McpError` is never changed.
    *
    * **Client backoff hint.** Clients that don't use `withRetry` can read
    * `error.data.retryable` to decide their own backoff strategy; when omitted,
@@ -406,9 +413,9 @@ export interface ErrorContract {
    * handler body names.
    *
    * **Lint-only metadata.** Nothing at runtime reads it: `ctx.fail` resolves
-   * `code` and `retryable`, the handler factories fill `recovery` and the tool
-   * factory resolves `severity` by reason, wherever the reason was thrown, and
-   * the advertised error envelope carries `reason` and `when`. A marked entry is
+   * `code` and `retryable`, the handler factories fill `recovery` and
+   * `retryable` and resolve `severity` by reason, wherever the reason was
+   * thrown, and the advertised error envelope carries `reason` and `when`. A marked entry is
    * advertised, typed, and thrown exactly as an unmarked one, and stays in the
    * `ctx.fail` / `ctx.recoveryFor` reason union.
    *

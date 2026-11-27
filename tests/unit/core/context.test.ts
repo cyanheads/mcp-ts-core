@@ -371,6 +371,100 @@ describe('resolveDeclaredFailure', () => {
     expect(failure).toMatchObject({ data: { recovery: { hint: RECOVERY } } });
     expect(Object.hasOwn(failure as McpError, 'literals')).toBe(false);
   });
+
+  describe('the entry’s retryable (#856)', () => {
+    const HINT = 'Retry the call once the upstream is back.';
+
+    /** `gone` under an entry declaring `retryable` as given, or none for `undefined`. */
+    const contractFor = (retryable: boolean | undefined): readonly ErrorContract[] => [
+      {
+        reason: 'gone',
+        code: JsonRpcErrorCode.NotFound,
+        when: 'The item is gone.',
+        recovery: RECOVERY,
+        ...(retryable !== undefined && { retryable }),
+      },
+    ];
+
+    const SIDES = [true, false, undefined] as const;
+
+    /**
+     * Every throw-site `retryable` × entry `retryable` × throw-site `recovery`
+     * cell: a throw-site value wins in both directions, the entry's applies
+     * without one, and an entry declaring none adds no key.
+     */
+    const cells = SIDES.flatMap((site) =>
+      SIDES.flatMap((entry) =>
+        [true, false].map((hint) => ({ site, entry, hint, expected: site ?? entry })),
+      ),
+    );
+
+    it.each(cells)(
+      'throw site $site, entry $entry, throw-site hint $hint: retryable $expected',
+      ({ site, entry, hint, expected }) => {
+        const data = {
+          reason: 'gone',
+          ...(site !== undefined && { retryable: site }),
+          ...(hint && { recovery: { hint: HINT } }),
+        };
+        const thrown = new McpError(JsonRpcErrorCode.ServiceUnavailable, 'upstream gone', {
+          ...data,
+        });
+        const contract = contractFor(entry);
+
+        const { failure } = resolveDeclaredFailure(contract, thrown);
+        const resolved = (failure as McpError).data ?? {};
+
+        expect(resolved.retryable).toBe(expected);
+        expect(Object.hasOwn(resolved, 'retryable')).toBe(expected !== undefined);
+        expect(resolved.recovery).toEqual({ hint: hint ? HINT : RECOVERY });
+        // A copy only when something was filled; the thrown error is never changed.
+        expect(failure === thrown).toBe(hint && (site !== undefined || entry === undefined));
+        expect(thrown.data).toEqual(data);
+        // `ctx.fail` resolves the same throw-site data to the same value.
+        expect(createFail(contract)('gone', undefined, data).data?.retryable).toBe(expected);
+      },
+    );
+
+    it('keeps an own retryable: undefined the throw site wrote, as ctx.fail does', () => {
+      const contract = contractFor(true);
+      const thrown = new McpError(JsonRpcErrorCode.NotFound, 'Gone.', {
+        reason: 'gone',
+        retryable: undefined,
+      });
+
+      const { failure } = resolveDeclaredFailure(contract, thrown);
+
+      expect((failure as McpError).data?.retryable).toBeUndefined();
+      expect(
+        createFail(contract)('gone', undefined, { retryable: undefined }).data?.retryable,
+      ).toBeUndefined();
+    });
+
+    it('fills retryable alone on a copy that keeps the thrown code, message, stack, cause, and literals', () => {
+      const thrown = new McpError(
+        JsonRpcErrorCode.ServiceUnavailable,
+        'Item _a*b is gone.',
+        { reason: 'gone', recovery: { hint: HINT } },
+        { cause: new Error('socket closed'), literals: ['_a*b'] },
+      );
+
+      const { entry, failure } = resolveDeclaredFailure(contractFor(false), thrown);
+
+      expect(entry?.retryable).toBe(false);
+      expect(failure).not.toBe(thrown);
+      expect(failure).toMatchObject({
+        code: JsonRpcErrorCode.ServiceUnavailable,
+        message: 'Item _a*b is gone.',
+        name: 'McpError',
+        stack: thrown.stack,
+        cause: thrown.cause,
+        literals: ['_a*b'],
+        data: { reason: 'gone', retryable: false, recovery: { hint: HINT } },
+      });
+      expect(thrown.data).toEqual({ reason: 'gone', recovery: { hint: HINT } });
+    });
+  });
 });
 
 describe('attachTypedFail', () => {

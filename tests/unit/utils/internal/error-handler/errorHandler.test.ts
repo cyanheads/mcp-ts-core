@@ -1263,6 +1263,52 @@ describe('ErrorHandler', () => {
       expect(result).toBeInstanceOf(Error);
       expect(result.message).toBe('string error');
     });
+
+    // Issue #676 — a string pattern matches as a case-insensitive substring.
+    describe('string and RegExp rules (#676)', () => {
+      const rule = (pattern: string | RegExp) => ({
+        pattern,
+        errorCode: JsonRpcErrorCode.InvalidParams,
+        factory: () => new Error('mapped'),
+      });
+
+      /** Whether `error` maps under a single rule of `pattern`. */
+      const maps = (error: unknown, pattern: string | RegExp) =>
+        ErrorHandler.mapError(error, [rule(pattern)]).message === 'mapped';
+
+      it.each([
+        ['$5', 'Charge of $5 was declined', true],
+        ['foo(', 'x foo( y', true],
+        ['C++', 'C++ compiler crashed', true],
+        ['DECLINED', 'Charge of $5 was declined', true],
+        ['a.b', 'status axb', false],
+        ['not found|missing', 'record missing', false],
+        ['not found|missing', 'lookup not found|missing here', true],
+      ])('maps under %j for the message %j: %s', (pattern, message, expected) => {
+        expect(maps(new Error(message), pattern)).toBe(expected);
+      });
+
+      it('matches a string against the error’s name as well as its message', () => {
+        const error = new Error('over the limit');
+        error.name = 'Quota$Exceeded';
+
+        expect(maps(error, 'quota$exceeded')).toBe(true);
+      });
+
+      it('maps under a RegExp after a string its source, a slash, and its flags spell compiled first', () => {
+        expect(maps(new Error('unrelated'), 'xyzprobe/i')).toBe(false);
+
+        expect(maps(new Error('xyzprobezy'), /xyzprobe/i)).toBe(true);
+      });
+
+      it('maps the same error the same way on every call under a sticky RegExp', () => {
+        const results = Array.from({ length: 4 }, () =>
+          maps(new Error('sticky-probe'), /sticky-probe/y),
+        );
+
+        expect(results).toEqual([true, true, true, true]);
+      });
+    });
   });
 
   // ─── a value whose reads throw (#697) ────────────────────────────────────────

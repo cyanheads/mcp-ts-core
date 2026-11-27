@@ -574,6 +574,16 @@ export type HandlerContext<
   (E extends ZodRawShape ? { enrich: TypedEnrich<E> } : { enrich: Context['enrich'] });
 
 /**
+ * The entry's `retryable` as the base a failure's `data` spreads over, so an
+ * own `retryable` key the throw site wrote wins; `undefined` when the entry
+ * declares none. One rule for {@link createFail} and
+ * {@link resolveDeclaredFailure}.
+ */
+function retryableDefault(entry: ErrorContract): { retryable: boolean } | undefined {
+  return entry.retryable !== undefined ? { retryable: entry.retryable } : undefined;
+}
+
+/**
  * @internal
  *
  * Builds a runtime `fail` function for a given contract. Looks up the entry
@@ -625,12 +635,10 @@ export function createFail(errors: readonly ErrorContract[]): TypedFail<string> 
     //   1. contract `retryable` as base default (only when the entry declares it)
     //   2. caller-supplied `data` (per-occurrence override, spread over the default)
     //   3. contract `reason` forced last (never overridable — observability invariant)
-    const retryableBase =
-      entry.retryable !== undefined ? { retryable: entry.retryable } : undefined;
     return new McpError(
       entry.code,
       message ?? entry.when,
-      { ...retryableBase, ...data, reason },
+      { ...retryableDefault(entry), ...data, reason },
       options,
     );
   };
@@ -669,26 +677,34 @@ export function createRecoveryFor(
 
 /**
  * Resolves a thrown failure against a definition's `errors[]` contract at the
- * handler boundary (#579): the entry its `data.reason` names, and the failure
- * to report — the thrown value itself, or, when the throw site left
- * `data.recovery` unset, a copy whose `data.recovery.hint` is the entry's
- * `recovery`. The tool factory reads both halves (the entry also decides the
- * log level, #380); the resource factory and `runToolContract` report the
- * failure.
+ * handler boundary (#579, #856): the entry its `data.reason` names, and the
+ * failure to report — the thrown value itself, or a copy that fills what the
+ * throw site left unset. Two fills, each decided on its own: `data.recovery`
+ * unset takes `{ hint: <entry.recovery> }`, and `data` with no own `retryable`
+ * key takes the entry's `retryable` when it declares one. The tool factory
+ * reads both halves (the entry also decides the log level, #380); the resource
+ * factory and `runToolContract` report the failure.
+ *
+ * The entry's `retryable` is spread under the thrown `data`, the precedence
+ * {@link createFail} applies, so a throw-site `retryable` wins in both
+ * directions, and a service throw resolves to the `data.retryable` a
+ * `ctx.fail` of the same reason carries. A throw-site `recovery` of any shape
+ * wins too, and setting one never stops the `retryable` fill.
  *
  * Matched on the reason alone, as {@link createRecoveryFor} and the declared
  * severity are, so a service that raises a declared reason through a different
- * factory still gets its hint; a reason declared twice resolves to its last
- * entry, as `createRecoveryFor` does. A throw-site `recovery` of any shape wins. A
- * non-`McpError`, an `McpError` without a string `data.reason`, and a reason
- * the contract never declared resolve to no entry and the thrown value as-is;
- * a cancellation reaches here already replaced by the reason-less error
- * `asRequestCancelled` builds.
+ * factory still gets its hint and `retryable`; a reason declared twice resolves
+ * to its last entry, as `createRecoveryFor` does. A non-`McpError`, an
+ * `McpError` without a string `data.reason`, and a reason the contract never
+ * declared resolve to no entry and the thrown value as-is; a cancellation
+ * reaches here already replaced by the reason-less error `asRequestCancelled`
+ * builds.
  *
  * The thrown error is never mutated — the `McpError` a handler-level test gets
- * from `ctx.fail` still carries exactly what the throw site wrote. The copy
- * keeps its code, message, name, stack, cause, and `literals`, so the log
- * record and the envelope built from it describe the same throw.
+ * from `ctx.fail` still carries exactly what the throw site wrote, and a
+ * service's own `withRetry` sees only what the service threw. The copy keeps
+ * its code, message, name, stack, cause, and `literals`, so the log record and
+ * the envelope built from it describe the same throw.
  *
  * Every read of the thrown value is guarded (#697): a value `instanceof` cannot
  * inspect and an `McpError` whose `data` cannot be read or copied (a getter, a
@@ -711,9 +727,10 @@ export function resolveDeclaredFailure<T>(
     typeof reason === 'string'
       ? errors?.findLast((candidate) => candidate.reason === reason)
       : undefined;
-  if (!entry || !thrown || declared?.recovery !== undefined) {
-    return { entry, failure: error };
-  }
+  if (!entry || !thrown || !declared) return { entry, failure: error };
+  const fillsRecovery = declared.recovery === undefined;
+  const fillsRetryable = entry.retryable !== undefined && !Object.hasOwn(declared, 'retryable');
+  if (!fillsRecovery && !fillsRetryable) return { entry, failure: error };
   const code = readField(thrown, 'code');
   const cause = readField(thrown, 'cause');
   // Carried as read: the tool error renderer reads them guarded, as it reads the thrown error's.
@@ -721,7 +738,11 @@ export function resolveDeclaredFailure<T>(
   const failure = new McpError(
     code === UNREADABLE ? entry.code : (code as JsonRpcErrorCode),
     errorText(readField(thrown, 'message')),
-    { ...declared, recovery: { hint: entry.recovery } },
+    {
+      ...retryableDefault(entry),
+      ...declared,
+      ...(fillsRecovery && { recovery: { hint: entry.recovery } }),
+    },
     {
       ...(cause !== undefined && cause !== UNREADABLE && { cause }),
       ...(literals !== undefined &&

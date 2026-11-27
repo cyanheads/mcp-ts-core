@@ -564,7 +564,9 @@ export class ErrorHandler {
   /**
    * Maps an error to a specific error type `T` by testing it against an ordered list of `ErrorMapping` rules.
    *
-   * Each mapping's `pattern` is tested (case-insensitively) against both the error message and error name.
+   * Each mapping's `pattern` is tested (case-insensitively) against both the error message and error name:
+   * a string as a literal substring, its regex metacharacters matching themselves, and a `RegExp` with its
+   * own flags minus `g` and `y`, so repeated calls on the same error map it the same way.
    * The first matching rule's `factory` is called with the original error and the mapping's `additionalContext`.
    * If no rule matches and `defaultFactory` is provided, it is called instead.
    * If neither matches, returns the original `Error` or wraps non-Error values in a plain `Error`.
